@@ -1,0 +1,16 @@
+# gltf.gltf: the flat public surface of the glTF 2.0 loader.
+#
+# re-exports every public symbol of the split modules under one namespace so a
+# bare `use gltf;` reaches the whole API as gltf.MAGIC, gltf.Header, and so on.
+# `[project].module = "gltf.mach"` makes that bare import resolve here.
+
+use gltf.glb;
+# links the startup entrypoint so `mach test` over this library produces a binary.
+use std.runtime;
+
+fwd glb.MAGIC;
+fwd glb.VERSION;
+fwd glb.CHUNK_JSON;
+fwd glb.CHUNK_BIN;
+fwd glb.Header;
+fwd glb.is_valid;

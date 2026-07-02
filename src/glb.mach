@@ -1,0 +1,60 @@
+# gltf.glb: the .glb binary container format.
+#
+# a .glb file is a 12-byte header followed by length-prefixed chunks. the
+# first chunk is always JSON (the glTF document); an optional second chunk
+# (BIN) carries the binary buffer referenced by the document. this module
+# defines the on-disk tags and header layout; chunk walking and document
+# parsing land on top of it as the loader grows.
+
+use std.types.bool.bool;
+
+# MAGIC: the .glb file magic, the ASCII bytes "glTF" read little-endian.
+pub val MAGIC: u32 = 0x46546C67;
+
+# VERSION: the container version defined by glTF 2.0.
+pub val VERSION: u32 = 2;
+
+# CHUNK_JSON: chunk type tag for the JSON document, ASCII "JSON".
+pub val CHUNK_JSON: u32 = 0x4E4F534A;
+
+# CHUNK_BIN: chunk type tag for the binary buffer, ASCII "BIN\0".
+pub val CHUNK_BIN: u32 = 0x004E4942;
+
+# Header: the 12-byte .glb file header, matching the on-disk layout.
+# ---
+# magic:   must equal MAGIC for a valid container
+# version: container version, 2 for glTF 2.0
+# length:  total file length in bytes, header included
+pub rec Header {
+    magic:   u32;
+    version: u32;
+    length:  u32;
+}
+
+# is_valid: report whether a header carries the glTF 2.0 container magic and version.
+pub fun is_valid(h: *Header) bool {
+    ret h.magic == MAGIC && h.version == VERSION;
+}
+
+test "glb: container magic and chunk tags match the specification" {
+    if (MAGIC != 0x46546C67) { ret 1; }
+    if (VERSION != 2) { ret 1; }
+    if (CHUNK_JSON != 0x4E4F534A) { ret 1; }
+    if (CHUNK_BIN != 0x004E4942) { ret 1; }
+    ret 0;
+}
+
+test "glb: is_valid accepts a well-formed header and rejects a bad magic" {
+    var ok: Header;
+    ok.magic = MAGIC;
+    ok.version = VERSION;
+    ok.length = 12;
+    if (!is_valid(?ok)) { ret 1; }
+
+    var bad: Header;
+    bad.magic = 0;
+    bad.version = VERSION;
+    bad.length = 12;
+    if (is_valid(?bad)) { ret 1; }
+    ret 0;
+}
