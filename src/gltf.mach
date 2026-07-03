@@ -6,6 +6,7 @@
 
 use gltf.glb;
 use gltf.doc;
+use gltf.parse;
 # links the startup entrypoint so `mach test` over this library produces a binary.
 use std.runtime;
 
@@ -87,3 +88,7 @@ fwd doc.AnimationSampler;
 fwd doc.AnimationChannel;
 fwd doc.Animation;
 fwd doc.Document;
+
+fwd parse.Loaded;
+fwd parse.parse_document;
+fwd parse.load_glb;

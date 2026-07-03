@@ -1,0 +1,838 @@
+# gltf.parse: build a document model from glTF JSON.
+#
+# walks a std.data.json Value tree into the typed gltf.doc records. numbers
+# come straight from the parser (integers via value_number, floats widened via
+# value_float), strings are borrowed as zero-copy StrViews into the input, and
+# every top-level array is allocated from the caller's allocator. the caller
+# owns that allocator and the JSON bytes; an arena freed wholesale is the
+# intended lifetime discipline, matching std.data.json's own Value tree.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.char.char;
+use std.types.string.str;
+use std.types.string.StrView;
+use std.types.string.view;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use json: std.data.json;
+use allo: std.allocator;
+use slice: std.collections.slice;
+use doc: gltf.doc;
+use glb: gltf.glb;
+
+# Loaded: a document parsed from a .glb together with its binary buffer.
+# ---
+# document: the parsed glTF document
+# bin:      pointer to the BIN chunk bytes, or nil when the container had none
+# bin_len:  BIN chunk length in bytes, or 0 when absent
+pub rec Loaded {
+    document: doc.Document;
+    bin:      *u8;
+    bin_len:  usize;
+}
+
+# get_i64: read an integer member, or dflt when absent or not a number.
+fun get_i64(obj: *json.Value, key: str, dflt: i64) i64 {
+    val m: *json.Value = json.value_find(obj, key);
+    if (m == nil) { ret dflt; }
+    if (!json.value_is_number(m)) { ret dflt; }
+    ret json.value_number(m);
+}
+
+# get_usize: read a non-negative integer member, or dflt when absent or invalid.
+fun get_usize(obj: *json.Value, key: str, dflt: usize) usize {
+    val n: i64 = get_i64(obj, key, dflt::i64);
+    if (n < 0) { ret dflt; }
+    ret n::usize;
+}
+
+# get_index: read an optional index member, NONE when absent.
+fun get_index(obj: *json.Value, key: str) i64 {
+    ret get_i64(obj, key, doc.NONE);
+}
+
+# get_f32: read a float member (int or float), or dflt when absent or not a number.
+fun get_f32(obj: *json.Value, key: str, dflt: f32) f32 {
+    val m: *json.Value = json.value_find(obj, key);
+    if (m == nil) { ret dflt; }
+    if (!json.value_is_number(m)) { ret dflt; }
+    ret json.value_float(m)::f32;
+}
+
+# get_bool: read a boolean member, or dflt when absent or not a boolean.
+fun get_bool(obj: *json.Value, key: str, dflt: bool) bool {
+    val m: *json.Value = json.value_find(obj, key);
+    if (m == nil) { ret dflt; }
+    if (!json.value_is_bool(m)) { ret dflt; }
+    ret json.value_bool(m);
+}
+
+# get_str: read a string member as a borrowed view, empty when absent.
+fun get_str(obj: *json.Value, key: str) StrView {
+    val m: *json.Value = json.value_find(obj, key);
+    if (m == nil) { ret view(nil, 0); }
+    if (!json.value_is_string(m)) { ret view(nil, 0); }
+    var len: usize = 0;
+    val p: *u8 = json.value_string(m, ?len);
+    ret view(p::*char, len);
+}
+
+# key_view: the i-th object key as a borrowed view.
+fun key_view(obj: *json.Value, i: usize) StrView {
+    val k: str = json.value_key(obj, i);
+    val klen: usize = json.value_key_len(obj, i);
+    ret view(k, klen);
+}
+
+# read_floats: copy up to cap numbers from a JSON array into out, returning the count.
+fun read_floats(arr: *json.Value, out: *f32, cap: usize) usize {
+    if (arr == nil || !json.value_is_array(arr)) { ret 0; }
+    var n: usize = json.value_count(arr);
+    if (n > cap) { n = cap; }
+    var i: usize = 0;
+    for (i < n) {
+        val e: *json.Value = json.value_get(arr, i);
+        if (e != nil && json.value_is_number(e)) {
+            out[i] = json.value_float(e)::f32;
+        } or {
+            out[i] = 0.0f32;
+        }
+        i = i + 1;
+    }
+    ret n;
+}
+
+# read_float_member: copy a member array of numbers into out, returning the count.
+fun read_float_member(obj: *json.Value, key: str, out: *f32, cap: usize) usize {
+    ret read_floats(json.value_find(obj, key), out, cap);
+}
+
+# parse_index_slice: allocate a Slice[i64] from a member array of indices.
+fun parse_index_slice(obj: *json.Value, key: str, alloc: *allo.Allocator) Result[slice.Slice[i64], str] {
+    val arr: *json.Value = json.value_find(obj, key);
+    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[i64], str](slice.make[i64](nil, 0)); }
+    val n: usize = json.value_count(arr);
+    if (n == 0) { ret ok[slice.Slice[i64], str](slice.make[i64](nil, 0)); }
+
+    val ar: Result[*i64, str] = allo.allocate[i64](alloc, n);
+    if (is_err[*i64, str](ar)) { ret err[slice.Slice[i64], str](unwrap_err[*i64, str](ar)); }
+    val data: *i64 = unwrap_ok[*i64, str](ar);
+
+    var i: usize = 0;
+    for (i < n) {
+        val e: *json.Value = json.value_get(arr, i);
+        if (e != nil && json.value_is_number(e)) {
+            data[i] = json.value_number(e);
+        } or {
+            data[i] = doc.NONE;
+        }
+        i = i + 1;
+    }
+    ret ok[slice.Slice[i64], str](slice.make[i64](data, n));
+}
+
+# parse_float_slice: allocate a Slice[f32] from a member array of numbers.
+fun parse_float_slice(obj: *json.Value, key: str, alloc: *allo.Allocator) Result[slice.Slice[f32], str] {
+    val arr: *json.Value = json.value_find(obj, key);
+    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[f32], str](slice.make[f32](nil, 0)); }
+    val n: usize = json.value_count(arr);
+    if (n == 0) { ret ok[slice.Slice[f32], str](slice.make[f32](nil, 0)); }
+
+    val ar: Result[*f32, str] = allo.allocate[f32](alloc, n);
+    if (is_err[*f32, str](ar)) { ret err[slice.Slice[f32], str](unwrap_err[*f32, str](ar)); }
+    val data: *f32 = unwrap_ok[*f32, str](ar);
+
+    read_floats(arr, data, n);
+    ret ok[slice.Slice[f32], str](slice.make[f32](data, n));
+}
+
+# parse_texture_ref: read a material texture reference object member.
+fun parse_texture_ref(obj: *json.Value, key: str) doc.TextureRef {
+    var t: doc.TextureRef;
+    t.index = doc.NONE;
+    t.tex_coord = 0;
+    val m: *json.Value = json.value_find(obj, key);
+    if (m == nil || !json.value_is_object(m)) { ret t; }
+    t.index = get_index(m, "index");
+    t.tex_coord = get_i64(m, "texCoord", 0);
+    ret t;
+}
+
+# parse_asset: read the top-level asset metadata.
+fun parse_asset(root: *json.Value) doc.Asset {
+    var a: doc.Asset;
+    a.version = view(nil, 0);
+    a.min_version = view(nil, 0);
+    a.generator = view(nil, 0);
+    a.copyright = view(nil, 0);
+    val m: *json.Value = json.value_find(root, "asset");
+    if (m == nil || !json.value_is_object(m)) { ret a; }
+    a.version = get_str(m, "version");
+    a.min_version = get_str(m, "minVersion");
+    a.generator = get_str(m, "generator");
+    a.copyright = get_str(m, "copyright");
+    ret a;
+}
+
+# parse_buffer: read one buffer definition.
+fun parse_buffer(e: *json.Value) doc.Buffer {
+    var b: doc.Buffer;
+    b.byte_length = get_usize(e, "byteLength", 0);
+    b.uri = get_str(e, "uri");
+    b.name = get_str(e, "name");
+    ret b;
+}
+
+# parse_buffer_view: read one buffer view definition.
+fun parse_buffer_view(e: *json.Value) doc.BufferView {
+    var v: doc.BufferView;
+    v.buffer = get_index(e, "buffer");
+    v.byte_offset = get_usize(e, "byteOffset", 0);
+    v.byte_length = get_usize(e, "byteLength", 0);
+    v.byte_stride = get_usize(e, "byteStride", 0);
+    v.target = get_index(e, "target");
+    v.name = get_str(e, "name");
+    ret v;
+}
+
+# accessor_type: map a glTF accessor type string to an AccessorType.
+# ---
+# ret: the matching type, or an error for an unrecognized string
+fun accessor_type(v: StrView) Result[doc.AccessorType, str] {
+    if (view_eq(v, "SCALAR")) { ret ok[doc.AccessorType, str](doc.TYPE_SCALAR); }
+    if (view_eq(v, "VEC2"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC2); }
+    if (view_eq(v, "VEC3"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC3); }
+    if (view_eq(v, "VEC4"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC4); }
+    if (view_eq(v, "MAT2"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT2); }
+    if (view_eq(v, "MAT3"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT3); }
+    if (view_eq(v, "MAT4"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT4); }
+    ret err[doc.AccessorType, str]("unknown accessor type");
+}
+
+# view_eq: compare a borrowed view against a null-terminated literal for byte equality.
+fun view_eq(v: StrView, s: str) bool {
+    var i: usize = 0;
+    for (i < v.len) {
+        if (s[i] == 0 || v.data[i] != s[i]) { ret false; }
+        i = i + 1;
+    }
+    ret s[v.len] == 0;
+}
+
+# parse_accessor: read one accessor definition, including optional min/max bounds.
+# ---
+# ret: the accessor, or an error for an unrecognized element type
+fun parse_accessor(e: *json.Value) Result[doc.Accessor, str] {
+    var a: doc.Accessor;
+    a.buffer_view = get_index(e, "bufferView");
+    a.byte_offset = get_usize(e, "byteOffset", 0);
+    a.component_type = get_i64(e, "componentType", 0)::doc.ComponentType;
+    a.normalized = get_bool(e, "normalized", false);
+    a.count = get_usize(e, "count", 0);
+    a.bounds_len = 0;
+    a.has_min = false;
+    a.has_max = false;
+    a.name = get_str(e, "name");
+
+    val tr: Result[doc.AccessorType, str] = accessor_type(get_str(e, "type"));
+    if (is_err[doc.AccessorType, str](tr)) { ret err[doc.Accessor, str](unwrap_err[doc.AccessorType, str](tr)); }
+    a.element_type = unwrap_ok[doc.AccessorType, str](tr);
+
+    val min_m: *json.Value = json.value_find(e, "min");
+    if (min_m != nil && json.value_is_array(min_m)) {
+        a.bounds_len = read_floats(min_m, ?a.min[0], doc.MAX_COMPONENTS);
+        a.has_min = true;
+    }
+    val max_m: *json.Value = json.value_find(e, "max");
+    if (max_m != nil && json.value_is_array(max_m)) {
+        val ml: usize = read_floats(max_m, ?a.max[0], doc.MAX_COMPONENTS);
+        if (ml > a.bounds_len) { a.bounds_len = ml; }
+        a.has_max = true;
+    }
+    ret ok[doc.Accessor, str](a);
+}
+
+# parse_attributes: read an attribute-map object into a Slice[Attribute].
+fun parse_attributes(obj: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.Attribute], str] {
+    if (obj == nil || !json.value_is_object(obj)) { ret ok[slice.Slice[doc.Attribute], str](slice.make[doc.Attribute](nil, 0)); }
+    val n: usize = json.value_count(obj);
+    if (n == 0) { ret ok[slice.Slice[doc.Attribute], str](slice.make[doc.Attribute](nil, 0)); }
+
+    val ar: Result[*doc.Attribute, str] = allo.allocate[doc.Attribute](alloc, n);
+    if (is_err[*doc.Attribute, str](ar)) { ret err[slice.Slice[doc.Attribute], str](unwrap_err[*doc.Attribute, str](ar)); }
+    val data: *doc.Attribute = unwrap_ok[*doc.Attribute, str](ar);
+
+    var i: usize = 0;
+    for (i < n) {
+        var at: doc.Attribute;
+        at.name = key_view(obj, i);
+        val cv: *json.Value = json.value_get(obj, i);
+        if (cv != nil && json.value_is_number(cv)) {
+            at.accessor = json.value_number(cv);
+        } or {
+            at.accessor = doc.NONE;
+        }
+        data[i] = at;
+        i = i + 1;
+    }
+    ret ok[slice.Slice[doc.Attribute], str](slice.make[doc.Attribute](data, n));
+}
+
+# parse_morph_targets: read a primitive's morph target array.
+fun parse_morph_targets(prim: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.MorphTarget], str] {
+    val arr: *json.Value = json.value_find(prim, "targets");
+    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[doc.MorphTarget], str](slice.make[doc.MorphTarget](nil, 0)); }
+    val n: usize = json.value_count(arr);
+    if (n == 0) { ret ok[slice.Slice[doc.MorphTarget], str](slice.make[doc.MorphTarget](nil, 0)); }
+
+    val ar: Result[*doc.MorphTarget, str] = allo.allocate[doc.MorphTarget](alloc, n);
+    if (is_err[*doc.MorphTarget, str](ar)) { ret err[slice.Slice[doc.MorphTarget], str](unwrap_err[*doc.MorphTarget, str](ar)); }
+    val data: *doc.MorphTarget = unwrap_ok[*doc.MorphTarget, str](ar);
+
+    var i: usize = 0;
+    for (i < n) {
+        val tr: Result[slice.Slice[doc.Attribute], str] = parse_attributes(json.value_get(arr, i), alloc);
+        if (is_err[slice.Slice[doc.Attribute], str](tr)) { ret err[slice.Slice[doc.MorphTarget], str](unwrap_err[slice.Slice[doc.Attribute], str](tr)); }
+        var t: doc.MorphTarget;
+        t.attributes = unwrap_ok[slice.Slice[doc.Attribute], str](tr);
+        data[i] = t;
+        i = i + 1;
+    }
+    ret ok[slice.Slice[doc.MorphTarget], str](slice.make[doc.MorphTarget](data, n));
+}
+
+# parse_primitive: read one mesh primitive.
+fun parse_primitive(e: *json.Value, alloc: *allo.Allocator) Result[doc.Primitive, str] {
+    var p: doc.Primitive;
+    p.indices = get_index(e, "indices");
+    p.material = get_index(e, "material");
+    p.mode = get_i64(e, "mode", doc.MODE_TRIANGLES::i64)::doc.PrimitiveMode;
+
+    val atr: Result[slice.Slice[doc.Attribute], str] = parse_attributes(json.value_find(e, "attributes"), alloc);
+    if (is_err[slice.Slice[doc.Attribute], str](atr)) { ret err[doc.Primitive, str](unwrap_err[slice.Slice[doc.Attribute], str](atr)); }
+    p.attributes = unwrap_ok[slice.Slice[doc.Attribute], str](atr);
+
+    val mtr: Result[slice.Slice[doc.MorphTarget], str] = parse_morph_targets(e, alloc);
+    if (is_err[slice.Slice[doc.MorphTarget], str](mtr)) { ret err[doc.Primitive, str](unwrap_err[slice.Slice[doc.MorphTarget], str](mtr)); }
+    p.targets = unwrap_ok[slice.Slice[doc.MorphTarget], str](mtr);
+    ret ok[doc.Primitive, str](p);
+}
+
+# parse_mesh: read one mesh and its primitives.
+fun parse_mesh(e: *json.Value, alloc: *allo.Allocator) Result[doc.Mesh, str] {
+    var m: doc.Mesh;
+    m.name = get_str(e, "name");
+
+    val wr: Result[slice.Slice[f32], str] = parse_float_slice(e, "weights", alloc);
+    if (is_err[slice.Slice[f32], str](wr)) { ret err[doc.Mesh, str](unwrap_err[slice.Slice[f32], str](wr)); }
+    m.weights = unwrap_ok[slice.Slice[f32], str](wr);
+
+    val arr: *json.Value = json.value_find(e, "primitives");
+    if (arr == nil || !json.value_is_array(arr)) {
+        m.primitives = slice.make[doc.Primitive](nil, 0);
+        ret ok[doc.Mesh, str](m);
+    }
+    val n: usize = json.value_count(arr);
+    if (n == 0) {
+        m.primitives = slice.make[doc.Primitive](nil, 0);
+        ret ok[doc.Mesh, str](m);
+    }
+
+    val ar: Result[*doc.Primitive, str] = allo.allocate[doc.Primitive](alloc, n);
+    if (is_err[*doc.Primitive, str](ar)) { ret err[doc.Mesh, str](unwrap_err[*doc.Primitive, str](ar)); }
+    val data: *doc.Primitive = unwrap_ok[*doc.Primitive, str](ar);
+
+    var i: usize = 0;
+    for (i < n) {
+        val pr: Result[doc.Primitive, str] = parse_primitive(json.value_get(arr, i), alloc);
+        if (is_err[doc.Primitive, str](pr)) { ret err[doc.Mesh, str](unwrap_err[doc.Primitive, str](pr)); }
+        data[i] = unwrap_ok[doc.Primitive, str](pr);
+        i = i + 1;
+    }
+    m.primitives = slice.make[doc.Primitive](data, n);
+    ret ok[doc.Mesh, str](m);
+}
+
+# parse_node: read one scene-graph node.
+fun parse_node(e: *json.Value, alloc: *allo.Allocator) Result[doc.Node, str] {
+    var nd: doc.Node;
+    nd.mesh = get_index(e, "mesh");
+    nd.skin = get_index(e, "skin");
+    nd.camera = get_index(e, "camera");
+    nd.name = get_str(e, "name");
+
+    nd.translation[0] = 0.0f32; nd.translation[1] = 0.0f32; nd.translation[2] = 0.0f32;
+    nd.rotation[0] = 0.0f32; nd.rotation[1] = 0.0f32; nd.rotation[2] = 0.0f32; nd.rotation[3] = 1.0f32;
+    nd.scale[0] = 1.0f32; nd.scale[1] = 1.0f32; nd.scale[2] = 1.0f32;
+
+    val mat_m: *json.Value = json.value_find(e, "matrix");
+    if (mat_m != nil && json.value_is_array(mat_m)) {
+        read_floats(mat_m, ?nd.matrix[0], 16);
+        nd.has_matrix = true;
+    } or {
+        nd.has_matrix = false;
+    }
+    read_float_member(e, "translation", ?nd.translation[0], 3);
+    read_float_member(e, "rotation", ?nd.rotation[0], 4);
+    read_float_member(e, "scale", ?nd.scale[0], 3);
+
+    val cr: Result[slice.Slice[i64], str] = parse_index_slice(e, "children", alloc);
+    if (is_err[slice.Slice[i64], str](cr)) { ret err[doc.Node, str](unwrap_err[slice.Slice[i64], str](cr)); }
+    nd.children = unwrap_ok[slice.Slice[i64], str](cr);
+
+    val wr: Result[slice.Slice[f32], str] = parse_float_slice(e, "weights", alloc);
+    if (is_err[slice.Slice[f32], str](wr)) { ret err[doc.Node, str](unwrap_err[slice.Slice[f32], str](wr)); }
+    nd.weights = unwrap_ok[slice.Slice[f32], str](wr);
+    ret ok[doc.Node, str](nd);
+}
+
+# parse_scene: read one scene.
+fun parse_scene(e: *json.Value, alloc: *allo.Allocator) Result[doc.Scene, str] {
+    var s: doc.Scene;
+    s.name = get_str(e, "name");
+    val nr: Result[slice.Slice[i64], str] = parse_index_slice(e, "nodes", alloc);
+    if (is_err[slice.Slice[i64], str](nr)) { ret err[doc.Scene, str](unwrap_err[slice.Slice[i64], str](nr)); }
+    s.nodes = unwrap_ok[slice.Slice[i64], str](nr);
+    ret ok[doc.Scene, str](s);
+}
+
+# parse_pbr: read a material's metallic-roughness parameters.
+fun parse_pbr(mat: *json.Value) doc.PbrMetallicRoughness {
+    var p: doc.PbrMetallicRoughness;
+    p.base_color_factor[0] = 1.0f32; p.base_color_factor[1] = 1.0f32;
+    p.base_color_factor[2] = 1.0f32; p.base_color_factor[3] = 1.0f32;
+    p.metallic_factor = 1.0f32;
+    p.roughness_factor = 1.0f32;
+    p.base_color_texture.index = doc.NONE;
+    p.base_color_texture.tex_coord = 0;
+    p.metallic_roughness_texture.index = doc.NONE;
+    p.metallic_roughness_texture.tex_coord = 0;
+
+    val m: *json.Value = json.value_find(mat, "pbrMetallicRoughness");
+    if (m == nil || !json.value_is_object(m)) { ret p; }
+    read_float_member(m, "baseColorFactor", ?p.base_color_factor[0], 4);
+    p.metallic_factor = get_f32(m, "metallicFactor", 1.0f32);
+    p.roughness_factor = get_f32(m, "roughnessFactor", 1.0f32);
+    p.base_color_texture = parse_texture_ref(m, "baseColorTexture");
+    p.metallic_roughness_texture = parse_texture_ref(m, "metallicRoughnessTexture");
+    ret p;
+}
+
+# alpha_mode: map a glTF alpha mode string to an AlphaMode, default OPAQUE.
+fun alpha_mode(v: StrView) doc.AlphaMode {
+    if (view_eq(v, "MASK"))  { ret doc.ALPHA_MASK; }
+    if (view_eq(v, "BLEND")) { ret doc.ALPHA_BLEND; }
+    ret doc.ALPHA_OPAQUE;
+}
+
+# parse_material: read one material.
+fun parse_material(e: *json.Value) doc.Material {
+    var mt: doc.Material;
+    mt.pbr = parse_pbr(e);
+    mt.normal_texture = parse_texture_ref(e, "normalTexture");
+    mt.occlusion_texture = parse_texture_ref(e, "occlusionTexture");
+    mt.emissive_texture = parse_texture_ref(e, "emissiveTexture");
+    mt.normal_scale = 1.0f32;
+    mt.occlusion_strength = 1.0f32;
+    mt.emissive_factor[0] = 0.0f32; mt.emissive_factor[1] = 0.0f32; mt.emissive_factor[2] = 0.0f32;
+    mt.alpha_cutoff = get_f32(e, "alphaCutoff", 0.5f32);
+    mt.double_sided = get_bool(e, "doubleSided", false);
+    mt.alpha_mode = alpha_mode(get_str(e, "alphaMode"));
+    mt.name = get_str(e, "name");
+
+    val nt: *json.Value = json.value_find(e, "normalTexture");
+    if (nt != nil && json.value_is_object(nt)) { mt.normal_scale = get_f32(nt, "scale", 1.0f32); }
+    val ot: *json.Value = json.value_find(e, "occlusionTexture");
+    if (ot != nil && json.value_is_object(ot)) { mt.occlusion_strength = get_f32(ot, "strength", 1.0f32); }
+    read_float_member(e, "emissiveFactor", ?mt.emissive_factor[0], 3);
+    ret mt;
+}
+
+# parse_texture: read one texture.
+fun parse_texture(e: *json.Value) doc.Texture {
+    var t: doc.Texture;
+    t.source = get_index(e, "source");
+    t.sampler = get_index(e, "sampler");
+    t.name = get_str(e, "name");
+    ret t;
+}
+
+# parse_image: read one image.
+fun parse_image(e: *json.Value) doc.Image {
+    var im: doc.Image;
+    im.uri = get_str(e, "uri");
+    im.mime_type = get_str(e, "mimeType");
+    im.buffer_view = get_index(e, "bufferView");
+    im.name = get_str(e, "name");
+    ret im;
+}
+
+# parse_sampler: read one sampler.
+fun parse_sampler(e: *json.Value) doc.Sampler {
+    var sm: doc.Sampler;
+    sm.mag_filter = get_index(e, "magFilter");
+    sm.min_filter = get_index(e, "minFilter");
+    sm.wrap_s = get_i64(e, "wrapS", 10497);
+    sm.wrap_t = get_i64(e, "wrapT", 10497);
+    sm.name = get_str(e, "name");
+    ret sm;
+}
+
+# parse_skin: read one skin.
+fun parse_skin(e: *json.Value, alloc: *allo.Allocator) Result[doc.Skin, str] {
+    var sk: doc.Skin;
+    sk.inverse_bind_matrices = get_index(e, "inverseBindMatrices");
+    sk.skeleton = get_index(e, "skeleton");
+    sk.name = get_str(e, "name");
+    val jr: Result[slice.Slice[i64], str] = parse_index_slice(e, "joints", alloc);
+    if (is_err[slice.Slice[i64], str](jr)) { ret err[doc.Skin, str](unwrap_err[slice.Slice[i64], str](jr)); }
+    sk.joints = unwrap_ok[slice.Slice[i64], str](jr);
+    ret ok[doc.Skin, str](sk);
+}
+
+# interpolation: map a glTF interpolation string to an Interpolation, default LINEAR.
+fun interpolation(v: StrView) doc.Interpolation {
+    if (view_eq(v, "STEP"))        { ret doc.INTERP_STEP; }
+    if (view_eq(v, "CUBICSPLINE")) { ret doc.INTERP_CUBICSPLINE; }
+    ret doc.INTERP_LINEAR;
+}
+
+# target_path: map a glTF channel target path string to a TargetPath, default TRANSLATION.
+fun target_path(v: StrView) doc.TargetPath {
+    if (view_eq(v, "rotation")) { ret doc.PATH_ROTATION; }
+    if (view_eq(v, "scale"))    { ret doc.PATH_SCALE; }
+    if (view_eq(v, "weights"))  { ret doc.PATH_WEIGHTS; }
+    ret doc.PATH_TRANSLATION;
+}
+
+# parse_anim_samplers: read an animation's sampler array.
+fun parse_anim_samplers(anim: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.AnimationSampler], str] {
+    val arr: *json.Value = json.value_find(anim, "samplers");
+    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[doc.AnimationSampler], str](slice.make[doc.AnimationSampler](nil, 0)); }
+    val n: usize = json.value_count(arr);
+    if (n == 0) { ret ok[slice.Slice[doc.AnimationSampler], str](slice.make[doc.AnimationSampler](nil, 0)); }
+
+    val ar: Result[*doc.AnimationSampler, str] = allo.allocate[doc.AnimationSampler](alloc, n);
+    if (is_err[*doc.AnimationSampler, str](ar)) { ret err[slice.Slice[doc.AnimationSampler], str](unwrap_err[*doc.AnimationSampler, str](ar)); }
+    val data: *doc.AnimationSampler = unwrap_ok[*doc.AnimationSampler, str](ar);
+
+    var i: usize = 0;
+    for (i < n) {
+        val e: *json.Value = json.value_get(arr, i);
+        var s: doc.AnimationSampler;
+        s.input = get_index(e, "input");
+        s.output = get_index(e, "output");
+        s.interpolation = interpolation(get_str(e, "interpolation"));
+        data[i] = s;
+        i = i + 1;
+    }
+    ret ok[slice.Slice[doc.AnimationSampler], str](slice.make[doc.AnimationSampler](data, n));
+}
+
+# parse_anim_channels: read an animation's channel array.
+fun parse_anim_channels(anim: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.AnimationChannel], str] {
+    val arr: *json.Value = json.value_find(anim, "channels");
+    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[doc.AnimationChannel], str](slice.make[doc.AnimationChannel](nil, 0)); }
+    val n: usize = json.value_count(arr);
+    if (n == 0) { ret ok[slice.Slice[doc.AnimationChannel], str](slice.make[doc.AnimationChannel](nil, 0)); }
+
+    val ar: Result[*doc.AnimationChannel, str] = allo.allocate[doc.AnimationChannel](alloc, n);
+    if (is_err[*doc.AnimationChannel, str](ar)) { ret err[slice.Slice[doc.AnimationChannel], str](unwrap_err[*doc.AnimationChannel, str](ar)); }
+    val data: *doc.AnimationChannel = unwrap_ok[*doc.AnimationChannel, str](ar);
+
+    var i: usize = 0;
+    for (i < n) {
+        val e: *json.Value = json.value_get(arr, i);
+        var c: doc.AnimationChannel;
+        c.sampler = get_index(e, "sampler");
+        c.target_node = doc.NONE;
+        c.target_path = doc.PATH_TRANSLATION;
+        val tgt: *json.Value = json.value_find(e, "target");
+        if (tgt != nil && json.value_is_object(tgt)) {
+            c.target_node = get_index(tgt, "node");
+            c.target_path = target_path(get_str(tgt, "path"));
+        }
+        data[i] = c;
+        i = i + 1;
+    }
+    ret ok[slice.Slice[doc.AnimationChannel], str](slice.make[doc.AnimationChannel](data, n));
+}
+
+# parse_animation: read one animation.
+fun parse_animation(e: *json.Value, alloc: *allo.Allocator) Result[doc.Animation, str] {
+    var an: doc.Animation;
+    an.name = get_str(e, "name");
+    val sr: Result[slice.Slice[doc.AnimationSampler], str] = parse_anim_samplers(e, alloc);
+    if (is_err[slice.Slice[doc.AnimationSampler], str](sr)) { ret err[doc.Animation, str](unwrap_err[slice.Slice[doc.AnimationSampler], str](sr)); }
+    an.samplers = unwrap_ok[slice.Slice[doc.AnimationSampler], str](sr);
+    val cr: Result[slice.Slice[doc.AnimationChannel], str] = parse_anim_channels(e, alloc);
+    if (is_err[slice.Slice[doc.AnimationChannel], str](cr)) { ret err[doc.Animation, str](unwrap_err[slice.Slice[doc.AnimationChannel], str](cr)); }
+    an.channels = unwrap_ok[slice.Slice[doc.AnimationChannel], str](cr);
+    ret ok[doc.Animation, str](an);
+}
+
+# fill_buffers: populate the buffer, buffer view, and accessor arrays.
+fun fill_buffers(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Result[bool, str] {
+    val ba: *json.Value = json.value_find(root, "buffers");
+    if (ba != nil && json.value_is_array(ba)) {
+        val n: usize = json.value_count(ba);
+        if (n > 0) {
+            val r: Result[*doc.Buffer, str] = allo.allocate[doc.Buffer](alloc, n);
+            if (is_err[*doc.Buffer, str](r)) { ret err[bool, str](unwrap_err[*doc.Buffer, str](r)); }
+            val data: *doc.Buffer = unwrap_ok[*doc.Buffer, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                data[i] = parse_buffer(json.value_get(ba, i));
+                i = i + 1;
+            }
+            d.buffers = slice.make[doc.Buffer](data, n);
+        }
+    }
+
+    val va: *json.Value = json.value_find(root, "bufferViews");
+    if (va != nil && json.value_is_array(va)) {
+        val n: usize = json.value_count(va);
+        if (n > 0) {
+            val r: Result[*doc.BufferView, str] = allo.allocate[doc.BufferView](alloc, n);
+            if (is_err[*doc.BufferView, str](r)) { ret err[bool, str](unwrap_err[*doc.BufferView, str](r)); }
+            val data: *doc.BufferView = unwrap_ok[*doc.BufferView, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                data[i] = parse_buffer_view(json.value_get(va, i));
+                i = i + 1;
+            }
+            d.buffer_views = slice.make[doc.BufferView](data, n);
+        }
+    }
+
+    val aa: *json.Value = json.value_find(root, "accessors");
+    if (aa != nil && json.value_is_array(aa)) {
+        val n: usize = json.value_count(aa);
+        if (n > 0) {
+            val r: Result[*doc.Accessor, str] = allo.allocate[doc.Accessor](alloc, n);
+            if (is_err[*doc.Accessor, str](r)) { ret err[bool, str](unwrap_err[*doc.Accessor, str](r)); }
+            val data: *doc.Accessor = unwrap_ok[*doc.Accessor, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                val er: Result[doc.Accessor, str] = parse_accessor(json.value_get(aa, i));
+                if (is_err[doc.Accessor, str](er)) { ret err[bool, str](unwrap_err[doc.Accessor, str](er)); }
+                data[i] = unwrap_ok[doc.Accessor, str](er);
+                i = i + 1;
+            }
+            d.accessors = slice.make[doc.Accessor](data, n);
+        }
+    }
+    ret ok[bool, str](true);
+}
+
+# fill_arrays: populate the scene-graph, mesh, material, and animation arrays.
+fun fill_arrays(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Result[bool, str] {
+    val sa: *json.Value = json.value_find(root, "scenes");
+    if (sa != nil && json.value_is_array(sa)) {
+        val n: usize = json.value_count(sa);
+        if (n > 0) {
+            val r: Result[*doc.Scene, str] = allo.allocate[doc.Scene](alloc, n);
+            if (is_err[*doc.Scene, str](r)) { ret err[bool, str](unwrap_err[*doc.Scene, str](r)); }
+            val data: *doc.Scene = unwrap_ok[*doc.Scene, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                val er: Result[doc.Scene, str] = parse_scene(json.value_get(sa, i), alloc);
+                if (is_err[doc.Scene, str](er)) { ret err[bool, str](unwrap_err[doc.Scene, str](er)); }
+                data[i] = unwrap_ok[doc.Scene, str](er);
+                i = i + 1;
+            }
+            d.scenes = slice.make[doc.Scene](data, n);
+        }
+    }
+
+    val na: *json.Value = json.value_find(root, "nodes");
+    if (na != nil && json.value_is_array(na)) {
+        val n: usize = json.value_count(na);
+        if (n > 0) {
+            val r: Result[*doc.Node, str] = allo.allocate[doc.Node](alloc, n);
+            if (is_err[*doc.Node, str](r)) { ret err[bool, str](unwrap_err[*doc.Node, str](r)); }
+            val data: *doc.Node = unwrap_ok[*doc.Node, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                val er: Result[doc.Node, str] = parse_node(json.value_get(na, i), alloc);
+                if (is_err[doc.Node, str](er)) { ret err[bool, str](unwrap_err[doc.Node, str](er)); }
+                data[i] = unwrap_ok[doc.Node, str](er);
+                i = i + 1;
+            }
+            d.nodes = slice.make[doc.Node](data, n);
+        }
+    }
+
+    val ma: *json.Value = json.value_find(root, "meshes");
+    if (ma != nil && json.value_is_array(ma)) {
+        val n: usize = json.value_count(ma);
+        if (n > 0) {
+            val r: Result[*doc.Mesh, str] = allo.allocate[doc.Mesh](alloc, n);
+            if (is_err[*doc.Mesh, str](r)) { ret err[bool, str](unwrap_err[*doc.Mesh, str](r)); }
+            val data: *doc.Mesh = unwrap_ok[*doc.Mesh, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                val er: Result[doc.Mesh, str] = parse_mesh(json.value_get(ma, i), alloc);
+                if (is_err[doc.Mesh, str](er)) { ret err[bool, str](unwrap_err[doc.Mesh, str](er)); }
+                data[i] = unwrap_ok[doc.Mesh, str](er);
+                i = i + 1;
+            }
+            d.meshes = slice.make[doc.Mesh](data, n);
+        }
+    }
+
+    val mta: *json.Value = json.value_find(root, "materials");
+    if (mta != nil && json.value_is_array(mta)) {
+        val n: usize = json.value_count(mta);
+        if (n > 0) {
+            val r: Result[*doc.Material, str] = allo.allocate[doc.Material](alloc, n);
+            if (is_err[*doc.Material, str](r)) { ret err[bool, str](unwrap_err[*doc.Material, str](r)); }
+            val data: *doc.Material = unwrap_ok[*doc.Material, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                data[i] = parse_material(json.value_get(mta, i));
+                i = i + 1;
+            }
+            d.materials = slice.make[doc.Material](data, n);
+        }
+    }
+
+    val ta: *json.Value = json.value_find(root, "textures");
+    if (ta != nil && json.value_is_array(ta)) {
+        val n: usize = json.value_count(ta);
+        if (n > 0) {
+            val r: Result[*doc.Texture, str] = allo.allocate[doc.Texture](alloc, n);
+            if (is_err[*doc.Texture, str](r)) { ret err[bool, str](unwrap_err[*doc.Texture, str](r)); }
+            val data: *doc.Texture = unwrap_ok[*doc.Texture, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                data[i] = parse_texture(json.value_get(ta, i));
+                i = i + 1;
+            }
+            d.textures = slice.make[doc.Texture](data, n);
+        }
+    }
+
+    val ia: *json.Value = json.value_find(root, "images");
+    if (ia != nil && json.value_is_array(ia)) {
+        val n: usize = json.value_count(ia);
+        if (n > 0) {
+            val r: Result[*doc.Image, str] = allo.allocate[doc.Image](alloc, n);
+            if (is_err[*doc.Image, str](r)) { ret err[bool, str](unwrap_err[*doc.Image, str](r)); }
+            val data: *doc.Image = unwrap_ok[*doc.Image, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                data[i] = parse_image(json.value_get(ia, i));
+                i = i + 1;
+            }
+            d.images = slice.make[doc.Image](data, n);
+        }
+    }
+
+    val spa: *json.Value = json.value_find(root, "samplers");
+    if (spa != nil && json.value_is_array(spa)) {
+        val n: usize = json.value_count(spa);
+        if (n > 0) {
+            val r: Result[*doc.Sampler, str] = allo.allocate[doc.Sampler](alloc, n);
+            if (is_err[*doc.Sampler, str](r)) { ret err[bool, str](unwrap_err[*doc.Sampler, str](r)); }
+            val data: *doc.Sampler = unwrap_ok[*doc.Sampler, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                data[i] = parse_sampler(json.value_get(spa, i));
+                i = i + 1;
+            }
+            d.samplers = slice.make[doc.Sampler](data, n);
+        }
+    }
+
+    val ka: *json.Value = json.value_find(root, "skins");
+    if (ka != nil && json.value_is_array(ka)) {
+        val n: usize = json.value_count(ka);
+        if (n > 0) {
+            val r: Result[*doc.Skin, str] = allo.allocate[doc.Skin](alloc, n);
+            if (is_err[*doc.Skin, str](r)) { ret err[bool, str](unwrap_err[*doc.Skin, str](r)); }
+            val data: *doc.Skin = unwrap_ok[*doc.Skin, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                val er: Result[doc.Skin, str] = parse_skin(json.value_get(ka, i), alloc);
+                if (is_err[doc.Skin, str](er)) { ret err[bool, str](unwrap_err[doc.Skin, str](er)); }
+                data[i] = unwrap_ok[doc.Skin, str](er);
+                i = i + 1;
+            }
+            d.skins = slice.make[doc.Skin](data, n);
+        }
+    }
+
+    val ana: *json.Value = json.value_find(root, "animations");
+    if (ana != nil && json.value_is_array(ana)) {
+        val n: usize = json.value_count(ana);
+        if (n > 0) {
+            val r: Result[*doc.Animation, str] = allo.allocate[doc.Animation](alloc, n);
+            if (is_err[*doc.Animation, str](r)) { ret err[bool, str](unwrap_err[*doc.Animation, str](r)); }
+            val data: *doc.Animation = unwrap_ok[*doc.Animation, str](r);
+            var i: usize = 0;
+            for (i < n) {
+                val er: Result[doc.Animation, str] = parse_animation(json.value_get(ana, i), alloc);
+                if (is_err[doc.Animation, str](er)) { ret err[bool, str](unwrap_err[doc.Animation, str](er)); }
+                data[i] = unwrap_ok[doc.Animation, str](er);
+                i = i + 1;
+            }
+            d.animations = slice.make[doc.Animation](data, n);
+        }
+    }
+    ret ok[bool, str](true);
+}
+
+# parse_document: parse a glTF JSON document into a Document.
+#
+# json_bytes and the allocator must outlive the returned document: strings are
+# borrowed from json_bytes and all arrays are allocated from alloc.
+# ---
+# json_bytes: the glTF JSON text
+# len:        length of json_bytes in bytes
+# alloc:      allocator for the document's arrays and the JSON value tree
+# ret:        the parsed document, or an error
+pub fun parse_document(json_bytes: *u8, len: usize, alloc: *allo.Allocator) Result[doc.Document, str] {
+    val jr: Result[json.Value, str] = json.parse(json_bytes, len, alloc);
+    if (is_err[json.Value, str](jr)) { ret err[doc.Document, str](unwrap_err[json.Value, str](jr)); }
+    var root: json.Value = unwrap_ok[json.Value, str](jr);
+    if (!json.value_is_object(?root)) { ret err[doc.Document, str]("glTF root is not an object"); }
+
+    var d: doc.Document;
+    d.asset = parse_asset(?root);
+    d.scene = get_index(?root, "scene");
+
+    val br: Result[bool, str] = fill_buffers(?root, ?d, alloc);
+    if (is_err[bool, str](br)) { ret err[doc.Document, str](unwrap_err[bool, str](br)); }
+    val ar: Result[bool, str] = fill_arrays(?root, ?d, alloc);
+    if (is_err[bool, str](ar)) { ret err[doc.Document, str](unwrap_err[bool, str](ar)); }
+    ret ok[doc.Document, str](d);
+}
+
+# load_glb: parse a .glb container into a document plus its BIN buffer.
+# ---
+# data:  the .glb bytes
+# len:   length of data in bytes
+# alloc: allocator for the document
+# ret:   the document and BIN span, or an error
+pub fun load_glb(data: *u8, len: usize, alloc: *allo.Allocator) Result[Loaded, str] {
+    val gr: Result[glb.Glb, str] = glb.parse_glb(data, len);
+    if (is_err[glb.Glb, str](gr)) { ret err[Loaded, str](unwrap_err[glb.Glb, str](gr)); }
+    val g: glb.Glb = unwrap_ok[glb.Glb, str](gr);
+
+    val dr: Result[doc.Document, str] = parse_document(g.json, g.json_len, alloc);
+    if (is_err[doc.Document, str](dr)) { ret err[Loaded, str](unwrap_err[doc.Document, str](dr)); }
+
+    var out: Loaded;
+    out.document = unwrap_ok[doc.Document, str](dr);
+    out.bin = g.bin;
+    out.bin_len = g.bin_len;
+    ret ok[Loaded, str](out);
+}
