@@ -1,0 +1,392 @@
+# gltf.accessor: typed reads of accessor data out of a buffer's bytes.
+#
+# an accessor names a typed, strided window into a buffer view's bytes; these
+# readers resolve that window against a document and a buffer's bytes (the BIN
+# chunk for a .glb), validate every bound against untrusted input, and copy the
+# elements into a tightly packed output array. component and element types are
+# checked so a reader never misinterprets the underlying bytes.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.types.string.str;
+use bytes: gltf.bytes;
+use doc: gltf.doc;
+use slice: std.collections.slice;
+
+# Plan: a validated read layout for one accessor over a buffer's bytes.
+# ---
+# base:           pointer to the first element's first byte
+# count:          number of elements
+# comps:          scalar components per element
+# comp_size:      byte width of one component
+# stride:         byte stride between consecutive elements
+# component_type: the accessor's component type
+# element_type:   the accessor's element type
+pub rec Plan {
+    base:           *u8;
+    count:          usize;
+    comps:          usize;
+    comp_size:      usize;
+    stride:         usize;
+    component_type: doc.ComponentType;
+    element_type:   doc.AccessorType;
+}
+
+# plan: resolve and bounds-check an accessor against a buffer's bytes.
+#
+# the accessor's buffer view must lie within the buffer, the accessor within
+# the view, and all elements within the view once stride is applied. every
+# check is overflow-safe: quantities are bounded by the buffer length, which is
+# a real allocation, so an untrusted count or stride cannot wrap past a bound.
+# ---
+# d:              the document owning the accessor and buffer view arrays
+# buffer:         the buffer's bytes (a .glb BIN chunk for buffer 0)
+# buffer_len:     length of buffer in bytes
+# accessor_index: index of the accessor to resolve
+# ret:            a validated Plan, or an error for any out-of-range reference
+pub fun plan(d: *doc.Document, buffer: *u8, buffer_len: usize, accessor_index: usize) Result[Plan, str] {
+    val ar: Result[*doc.Accessor, str] = slice.get[doc.Accessor](d.accessors, accessor_index);
+    if (is_err[*doc.Accessor, str](ar)) { ret err[Plan, str]("accessor index out of range"); }
+    val a: *doc.Accessor = unwrap_ok[*doc.Accessor, str](ar);
+
+    if (a.buffer_view == doc.NONE) { ret err[Plan, str]("accessor has no buffer view"); }
+    if (a.buffer_view < 0) { ret err[Plan, str]("accessor buffer view index is negative"); }
+    val bvr: Result[*doc.BufferView, str] = slice.get[doc.BufferView](d.buffer_views, a.buffer_view::usize);
+    if (is_err[*doc.BufferView, str](bvr)) { ret err[Plan, str]("buffer view index out of range"); }
+    val bv: *doc.BufferView = unwrap_ok[*doc.BufferView, str](bvr);
+
+    val comps: usize = doc.component_count(a.element_type);
+    val csize: usize = doc.component_size(a.component_type);
+    if (comps == 0 || csize == 0) { ret err[Plan, str]("accessor has unknown type or component type"); }
+    val esize: usize = comps * csize;
+
+    var stride: usize = bv.byte_stride;
+    if (stride == 0) { stride = esize; }
+    if (stride < esize) { ret err[Plan, str]("buffer view stride smaller than element"); }
+
+    if (bv.byte_offset > buffer_len) { ret err[Plan, str]("buffer view offset exceeds buffer"); }
+    if (bv.byte_length > buffer_len - bv.byte_offset) { ret err[Plan, str]("buffer view exceeds buffer"); }
+
+    if (a.byte_offset > bv.byte_length) { ret err[Plan, str]("accessor offset exceeds buffer view"); }
+    val avail: usize = bv.byte_length - a.byte_offset;
+
+    var p: Plan;
+    p.base = (buffer::usize + bv.byte_offset + a.byte_offset)::*u8;
+    p.count = a.count;
+    p.comps = comps;
+    p.comp_size = csize;
+    p.stride = stride;
+    p.component_type = a.component_type;
+    p.element_type = a.element_type;
+
+    if (a.count == 0) { ret ok[Plan, str](p); }
+    if (esize > avail) { ret err[Plan, str]("accessor element exceeds buffer view"); }
+    val max_additional: usize = (avail - esize) / stride;
+    if (a.count - 1 > max_additional) { ret err[Plan, str]("accessor data exceeds buffer view"); }
+    ret ok[Plan, str](p);
+}
+
+# read_f32: read a FLOAT accessor's components into a tightly packed f32 array.
+# ---
+# p:   a plan resolved by plan
+# out: destination for count*comps float values
+# cap: capacity of out in elements
+# ret: number of scalar values written, or an error
+pub fun read_f32(p: *Plan, out: *f32, cap: usize) Result[usize, str] {
+    if (p.component_type != doc.COMPONENT_FLOAT) { ret err[usize, str]("accessor component type is not float"); }
+    val total: usize = p.count * p.comps;
+    if (total > cap) { ret err[usize, str]("output buffer too small"); }
+
+    var e: usize = 0;
+    for (e < p.count) {
+        var c: usize = 0;
+        for (c < p.comps) {
+            out[e * p.comps + c] = bytes.read_f32(p.base, e * p.stride + c * p.comp_size);
+            c = c + 1;
+        }
+        e = e + 1;
+    }
+    ret ok[usize, str](total);
+}
+
+# read_u32: read an UNSIGNED_INT accessor's components into a tightly packed u32 array.
+# ---
+# p:   a plan resolved by plan
+# out: destination for count*comps u32 values
+# cap: capacity of out in elements
+# ret: number of scalar values written, or an error
+pub fun read_u32(p: *Plan, out: *u32, cap: usize) Result[usize, str] {
+    if (p.component_type != doc.COMPONENT_UNSIGNED_INT) { ret err[usize, str]("accessor component type is not unsigned int"); }
+    val total: usize = p.count * p.comps;
+    if (total > cap) { ret err[usize, str]("output buffer too small"); }
+
+    var e: usize = 0;
+    for (e < p.count) {
+        var c: usize = 0;
+        for (c < p.comps) {
+            out[e * p.comps + c] = bytes.read_u32(p.base, e * p.stride + c * p.comp_size);
+            c = c + 1;
+        }
+        e = e + 1;
+    }
+    ret ok[usize, str](total);
+}
+
+# read_u16: read an UNSIGNED_SHORT accessor's components into a tightly packed u16 array.
+# ---
+# p:   a plan resolved by plan
+# out: destination for count*comps u16 values
+# cap: capacity of out in elements
+# ret: number of scalar values written, or an error
+pub fun read_u16(p: *Plan, out: *u16, cap: usize) Result[usize, str] {
+    if (p.component_type != doc.COMPONENT_UNSIGNED_SHORT) { ret err[usize, str]("accessor component type is not unsigned short"); }
+    val total: usize = p.count * p.comps;
+    if (total > cap) { ret err[usize, str]("output buffer too small"); }
+
+    var e: usize = 0;
+    for (e < p.count) {
+        var c: usize = 0;
+        for (c < p.comps) {
+            out[e * p.comps + c] = bytes.read_u16(p.base, e * p.stride + c * p.comp_size);
+            c = c + 1;
+        }
+        e = e + 1;
+    }
+    ret ok[usize, str](total);
+}
+
+# read_u8: read an UNSIGNED_BYTE accessor's components into a tightly packed u8 array.
+# ---
+# p:   a plan resolved by plan
+# out: destination for count*comps u8 values
+# cap: capacity of out in elements
+# ret: number of scalar values written, or an error
+pub fun read_u8(p: *Plan, out: *u8, cap: usize) Result[usize, str] {
+    if (p.component_type != doc.COMPONENT_UNSIGNED_BYTE) { ret err[usize, str]("accessor component type is not unsigned byte"); }
+    val total: usize = p.count * p.comps;
+    if (total > cap) { ret err[usize, str]("output buffer too small"); }
+
+    var e: usize = 0;
+    for (e < p.count) {
+        var c: usize = 0;
+        for (c < p.comps) {
+            out[e * p.comps + c] = p.base[e * p.stride + c * p.comp_size];
+            c = c + 1;
+        }
+        e = e + 1;
+    }
+    ret ok[usize, str](total);
+}
+
+# build_doc: assemble a single-accessor document over one buffer view for tests.
+fun build_doc(bv: *doc.BufferView, a: *doc.Accessor, d: *doc.Document) {
+    d.buffer_views = slice.make[doc.BufferView](bv, 1);
+    d.accessors = slice.make[doc.Accessor](a, 1);
+}
+
+test "accessor: read_f32 reads packed vec3 elements exactly" {
+    var bin: [24]u8;
+    bytes.write_f32(?bin[0], 0, 1.0f32);
+    bytes.write_f32(?bin[0], 4, 2.0f32);
+    bytes.write_f32(?bin[0], 8, 3.0f32);
+    bytes.write_f32(?bin[0], 12, -4.5f32);
+    bytes.write_f32(?bin[0], 16, 0.25f32);
+    bytes.write_f32(?bin[0], 20, 100.0f32);
+
+    var bv: doc.BufferView;
+    bv.buffer = 0;
+    bv.byte_offset = 0;
+    bv.byte_length = 24;
+    bv.byte_stride = 0;
+    bv.target = doc.NONE;
+
+    var a: doc.Accessor;
+    a.buffer_view = 0;
+    a.byte_offset = 0;
+    a.component_type = doc.COMPONENT_FLOAT;
+    a.count = 2;
+    a.element_type = doc.TYPE_VEC3;
+
+    var d: doc.Document;
+    build_doc(?bv, ?a, ?d);
+
+    val pr: Result[Plan, str] = plan(?d, ?bin[0], 24, 0);
+    if (is_err[Plan, str](pr)) { ret 1; }
+    var pl: Plan = unwrap_ok[Plan, str](pr);
+
+    var out: [6]f32;
+    val rr: Result[usize, str] = read_f32(?pl, ?out[0], 6);
+    if (is_err[usize, str](rr)) { ret 1; }
+    if (unwrap_ok[usize, str](rr) != 6) { ret 1; }
+    if (out[0] != 1.0f32 || out[1] != 2.0f32 || out[2] != 3.0f32) { ret 1; }
+    if (out[3] != -4.5f32 || out[4] != 0.25f32 || out[5] != 100.0f32) { ret 1; }
+    ret 0;
+}
+
+test "accessor: read_f32 honors a byte stride, skipping padding" {
+    # two vec2 elements at stride 12: 8 data bytes then 4 padding bytes each.
+    var bin: [20]u8;
+    bytes.write_f32(?bin[0], 0, 10.0f32);
+    bytes.write_f32(?bin[0], 4, 11.0f32);
+    bytes.write_f32(?bin[0], 8, 0.0f32);
+    bytes.write_f32(?bin[0], 12, 20.0f32);
+    bytes.write_f32(?bin[0], 16, 21.0f32);
+
+    var bv: doc.BufferView;
+    bv.buffer = 0;
+    bv.byte_offset = 0;
+    bv.byte_length = 20;
+    bv.byte_stride = 12;
+    bv.target = doc.NONE;
+
+    var a: doc.Accessor;
+    a.buffer_view = 0;
+    a.byte_offset = 0;
+    a.component_type = doc.COMPONENT_FLOAT;
+    a.count = 2;
+    a.element_type = doc.TYPE_VEC2;
+
+    var d: doc.Document;
+    build_doc(?bv, ?a, ?d);
+
+    val pr: Result[Plan, str] = plan(?d, ?bin[0], 20, 0);
+    if (is_err[Plan, str](pr)) { ret 1; }
+    var pl: Plan = unwrap_ok[Plan, str](pr);
+
+    var out: [4]f32;
+    val rr: Result[usize, str] = read_f32(?pl, ?out[0], 4);
+    if (is_err[usize, str](rr)) { ret 1; }
+    if (out[0] != 10.0f32 || out[1] != 11.0f32) { ret 1; }
+    if (out[2] != 20.0f32 || out[3] != 21.0f32) { ret 1; }
+    ret 0;
+}
+
+test "accessor: read_u16 reads scalar indices with an accessor byte offset" {
+    var bin: [10]u8;
+    bytes.write_u16(?bin[0], 0, 999);
+    bytes.write_u16(?bin[0], 2, 0);
+    bytes.write_u16(?bin[0], 4, 1);
+    bytes.write_u16(?bin[0], 6, 2);
+    bytes.write_u16(?bin[0], 8, 65535);
+
+    var bv: doc.BufferView;
+    bv.buffer = 0;
+    bv.byte_offset = 0;
+    bv.byte_length = 10;
+    bv.byte_stride = 0;
+    bv.target = doc.NONE;
+
+    # skip the first u16 via the accessor byte offset.
+    var a: doc.Accessor;
+    a.buffer_view = 0;
+    a.byte_offset = 2;
+    a.component_type = doc.COMPONENT_UNSIGNED_SHORT;
+    a.count = 4;
+    a.element_type = doc.TYPE_SCALAR;
+
+    var d: doc.Document;
+    build_doc(?bv, ?a, ?d);
+
+    val pr: Result[Plan, str] = plan(?d, ?bin[0], 10, 0);
+    if (is_err[Plan, str](pr)) { ret 1; }
+    var pl: Plan = unwrap_ok[Plan, str](pr);
+
+    var out: [4]u16;
+    val rr: Result[usize, str] = read_u16(?pl, ?out[0], 4);
+    if (is_err[usize, str](rr)) { ret 1; }
+    if (out[0] != 0 || out[1] != 1 || out[2] != 2 || out[3] != 65535) { ret 1; }
+    ret 0;
+}
+
+test "accessor: plan rejects an accessor whose data exceeds the buffer view" {
+    var bin: [12]u8;
+
+    var bv: doc.BufferView;
+    bv.buffer = 0;
+    bv.byte_offset = 0;
+    bv.byte_length = 12;
+    bv.byte_stride = 0;
+    bv.target = doc.NONE;
+
+    # four vec3 floats need 48 bytes but the view is only 12.
+    var a: doc.Accessor;
+    a.buffer_view = 0;
+    a.byte_offset = 0;
+    a.component_type = doc.COMPONENT_FLOAT;
+    a.count = 4;
+    a.element_type = doc.TYPE_VEC3;
+
+    var d: doc.Document;
+    build_doc(?bv, ?a, ?d);
+
+    if (!is_err[Plan, str](plan(?d, ?bin[0], 12, 0))) { ret 1; }
+    ret 0;
+}
+
+test "accessor: plan rejects a buffer view that exceeds the buffer" {
+    var bin: [12]u8;
+
+    var bv: doc.BufferView;
+    bv.buffer = 0;
+    bv.byte_offset = 8;
+    bv.byte_length = 32;
+    bv.byte_stride = 0;
+    bv.target = doc.NONE;
+
+    var a: doc.Accessor;
+    a.buffer_view = 0;
+    a.byte_offset = 0;
+    a.component_type = doc.COMPONENT_FLOAT;
+    a.count = 1;
+    a.element_type = doc.TYPE_SCALAR;
+
+    var d: doc.Document;
+    build_doc(?bv, ?a, ?d);
+
+    if (!is_err[Plan, str](plan(?d, ?bin[0], 12, 0))) { ret 1; }
+    ret 0;
+}
+
+test "accessor: read rejects a mismatched component type and a small output" {
+    var bin: [8]u8;
+    bytes.write_u16(?bin[0], 0, 1);
+    bytes.write_u16(?bin[0], 2, 2);
+    bytes.write_u16(?bin[0], 4, 3);
+    bytes.write_u16(?bin[0], 6, 4);
+
+    var bv: doc.BufferView;
+    bv.buffer = 0;
+    bv.byte_offset = 0;
+    bv.byte_length = 8;
+    bv.byte_stride = 0;
+    bv.target = doc.NONE;
+
+    var a: doc.Accessor;
+    a.buffer_view = 0;
+    a.byte_offset = 0;
+    a.component_type = doc.COMPONENT_UNSIGNED_SHORT;
+    a.count = 4;
+    a.element_type = doc.TYPE_SCALAR;
+
+    var d: doc.Document;
+    build_doc(?bv, ?a, ?d);
+
+    val pr: Result[Plan, str] = plan(?d, ?bin[0], 8, 0);
+    if (is_err[Plan, str](pr)) { ret 1; }
+    var pl: Plan = unwrap_ok[Plan, str](pr);
+
+    var wrong: [4]f32;
+    if (!is_err[usize, str](read_f32(?pl, ?wrong[0], 4))) { ret 1; }
+
+    var small: [2]u16;
+    if (!is_err[usize, str](read_u16(?pl, ?small[0], 2))) { ret 1; }
+    ret 0;
+}
