@@ -1,4 +1,4 @@
-# gltf.gltf: the flat public surface of the glTF 2.0 loader.
+# the flat public surface of the glTF 2.0 loader
 #
 # re-exports every public symbol of the split modules under one namespace so a
 # bare `use gltf;` reaches the whole API as gltf.MAGIC, gltf.Header, and so on.

@@ -1,4 +1,4 @@
-# gltf.parse: build a document model from glTF JSON.
+# build a document model from glTF JSON
 #
 # walks a std.data.json Value tree into the typed gltf.doc records. numbers
 # come straight from the parser (integers via value_number, floats widened via
@@ -21,16 +21,16 @@ use std.types.result.err;
 use std.types.result.is_err;
 use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
-use json: std.data.json;
-use allo: std.allocator;
-use slice: std.collections.slice;
-use doc: gltf.doc;
-use glb: gltf.glb;
-use bytes: gltf.bytes;
+use json:     std.data.json;
+use allo:     std.allocator;
+use slice:    std.collections.slice;
+use doc:      gltf.doc;
+use glb:      gltf.glb;
+use bytes:    gltf.bytes;
 use accessor: gltf.accessor;
-use page: std.allocator.page;
+use page:     std.allocator.page;
 
-# Loaded: a document parsed from a .glb together with its binary buffer.
+# a document parsed from a .glb together with its binary buffer
 # ---
 # document: the parsed glTF document
 # bin:      pointer to the BIN chunk bytes, or nil when the container had none
@@ -41,7 +41,7 @@ pub rec Loaded {
     bin_len:  usize;
 }
 
-# get_i64: read an integer member, or dflt when absent or not a number.
+# read an integer member, or dflt when absent or not a number
 fun get_i64(obj: *json.Value, key: str, dflt: i64) i64 {
     val m: *json.Value = json.value_find(obj, key);
     if (m == nil) { ret dflt; }
@@ -49,19 +49,19 @@ fun get_i64(obj: *json.Value, key: str, dflt: i64) i64 {
     ret json.value_number(m);
 }
 
-# get_usize: read a non-negative integer member, or dflt when absent or invalid.
+# read a non-negative integer member, or dflt when absent or invalid
 fun get_usize(obj: *json.Value, key: str, dflt: usize) usize {
     val n: i64 = get_i64(obj, key, dflt::i64);
     if (n < 0) { ret dflt; }
     ret n::usize;
 }
 
-# get_index: read an optional index member, NONE when absent.
+# read an optional index member, NONE when absent
 fun get_index(obj: *json.Value, key: str) i64 {
     ret get_i64(obj, key, doc.NONE);
 }
 
-# get_f32: read a float member (int or float), or dflt when absent or not a number.
+# read a float member (int or float), or dflt when absent or not a number
 fun get_f32(obj: *json.Value, key: str, dflt: f32) f32 {
     val m: *json.Value = json.value_find(obj, key);
     if (m == nil) { ret dflt; }
@@ -69,7 +69,7 @@ fun get_f32(obj: *json.Value, key: str, dflt: f32) f32 {
     ret json.value_float(m)::f32;
 }
 
-# get_bool: read a boolean member, or dflt when absent or not a boolean.
+# read a boolean member, or dflt when absent or not a boolean
 fun get_bool(obj: *json.Value, key: str, dflt: bool) bool {
     val m: *json.Value = json.value_find(obj, key);
     if (m == nil) { ret dflt; }
@@ -77,7 +77,7 @@ fun get_bool(obj: *json.Value, key: str, dflt: bool) bool {
     ret json.value_bool(m);
 }
 
-# get_str: read a string member as a borrowed view, empty when absent.
+# read a string member as a borrowed view, empty when absent
 fun get_str(obj: *json.Value, key: str) StrView {
     val m: *json.Value = json.value_find(obj, key);
     if (m == nil) { ret view(nil, 0); }
@@ -87,14 +87,14 @@ fun get_str(obj: *json.Value, key: str) StrView {
     ret view(p::*char, len);
 }
 
-# key_view: the i-th object key as a borrowed view.
+# the i-th object key as a borrowed view
 fun key_view(obj: *json.Value, i: usize) StrView {
     val k: str = json.value_key(obj, i);
     val klen: usize = json.value_key_len(obj, i);
     ret view(k, klen);
 }
 
-# read_floats: copy up to cap numbers from a JSON array into out, returning the count.
+# copy up to cap numbers from a JSON array into out, returning the count
 fun read_floats(arr: *json.Value, out: *f32, cap: usize) usize {
     if (arr == nil || !json.value_is_array(arr)) { ret 0; }
     var n: usize = json.value_count(arr);
@@ -112,12 +112,12 @@ fun read_floats(arr: *json.Value, out: *f32, cap: usize) usize {
     ret n;
 }
 
-# read_float_member: copy a member array of numbers into out, returning the count.
+# copy a member array of numbers into out, returning the count
 fun read_float_member(obj: *json.Value, key: str, out: *f32, cap: usize) usize {
     ret read_floats(json.value_find(obj, key), out, cap);
 }
 
-# parse_index_slice: allocate a Slice[i64] from a member array of indices.
+# allocate a Slice[i64] from a member array of indices
 fun parse_index_slice(obj: *json.Value, key: str, alloc: *allo.Allocator) Result[slice.Slice[i64], str] {
     val arr: *json.Value = json.value_find(obj, key);
     if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[i64], str](slice.make[i64](nil, 0)); }
@@ -141,7 +141,7 @@ fun parse_index_slice(obj: *json.Value, key: str, alloc: *allo.Allocator) Result
     ret ok[slice.Slice[i64], str](slice.make[i64](data, n));
 }
 
-# parse_float_slice: allocate a Slice[f32] from a member array of numbers.
+# allocate a Slice[f32] from a member array of numbers
 fun parse_float_slice(obj: *json.Value, key: str, alloc: *allo.Allocator) Result[slice.Slice[f32], str] {
     val arr: *json.Value = json.value_find(obj, key);
     if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[f32], str](slice.make[f32](nil, 0)); }
@@ -156,7 +156,7 @@ fun parse_float_slice(obj: *json.Value, key: str, alloc: *allo.Allocator) Result
     ret ok[slice.Slice[f32], str](slice.make[f32](data, n));
 }
 
-# parse_texture_ref: read a material texture reference object member.
+# read a material texture reference object member
 fun parse_texture_ref(obj: *json.Value, key: str) doc.TextureRef {
     var t: doc.TextureRef;
     t.index = doc.NONE;
@@ -168,7 +168,7 @@ fun parse_texture_ref(obj: *json.Value, key: str) doc.TextureRef {
     ret t;
 }
 
-# parse_asset: read the top-level asset metadata.
+# read the top-level asset metadata
 fun parse_asset(root: *json.Value) doc.Asset {
     var a: doc.Asset;
     a.version = view(nil, 0);
@@ -184,7 +184,7 @@ fun parse_asset(root: *json.Value) doc.Asset {
     ret a;
 }
 
-# parse_buffer: read one buffer definition.
+# read one buffer definition
 fun parse_buffer(e: *json.Value) doc.Buffer {
     var b: doc.Buffer;
     b.byte_length = get_usize(e, "byteLength", 0);
@@ -193,7 +193,7 @@ fun parse_buffer(e: *json.Value) doc.Buffer {
     ret b;
 }
 
-# parse_buffer_view: read one buffer view definition.
+# read one buffer view definition
 fun parse_buffer_view(e: *json.Value) doc.BufferView {
     var v: doc.BufferView;
     v.buffer = get_index(e, "buffer");
@@ -205,7 +205,7 @@ fun parse_buffer_view(e: *json.Value) doc.BufferView {
     ret v;
 }
 
-# accessor_type: map a glTF accessor type string to an AccessorType.
+# map a glTF accessor type string to an AccessorType
 # ---
 # ret: the matching type, or an error for an unrecognized string
 fun accessor_type(v: StrView) Result[doc.AccessorType, str] {
@@ -219,7 +219,7 @@ fun accessor_type(v: StrView) Result[doc.AccessorType, str] {
     ret err[doc.AccessorType, str]("unknown accessor type");
 }
 
-# view_eq: compare a borrowed view against a null-terminated literal for byte equality.
+# compare a borrowed view against a null-terminated literal for byte equality
 fun view_eq(v: StrView, s: str) bool {
     var i: usize = 0;
     for (i < v.len) {
@@ -229,7 +229,7 @@ fun view_eq(v: StrView, s: str) bool {
     ret s[v.len] == 0;
 }
 
-# parse_accessor: read one accessor definition, including optional min/max bounds.
+# read one accessor definition, including optional min/max bounds
 # ---
 # ret: the accessor, or an error for an unrecognized element type
 fun parse_accessor(e: *json.Value) Result[doc.Accessor, str] {
@@ -262,7 +262,7 @@ fun parse_accessor(e: *json.Value) Result[doc.Accessor, str] {
     ret ok[doc.Accessor, str](a);
 }
 
-# parse_attributes: read an attribute-map object into a Slice[Attribute].
+# read an attribute-map object into a Slice[Attribute]
 fun parse_attributes(obj: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.Attribute], str] {
     if (obj == nil || !json.value_is_object(obj)) { ret ok[slice.Slice[doc.Attribute], str](slice.make[doc.Attribute](nil, 0)); }
     val n: usize = json.value_count(obj);
@@ -288,7 +288,7 @@ fun parse_attributes(obj: *json.Value, alloc: *allo.Allocator) Result[slice.Slic
     ret ok[slice.Slice[doc.Attribute], str](slice.make[doc.Attribute](data, n));
 }
 
-# parse_morph_targets: read a primitive's morph target array.
+# read a primitive's morph target array
 fun parse_morph_targets(prim: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.MorphTarget], str] {
     val arr: *json.Value = json.value_find(prim, "targets");
     if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[doc.MorphTarget], str](slice.make[doc.MorphTarget](nil, 0)); }
@@ -311,7 +311,7 @@ fun parse_morph_targets(prim: *json.Value, alloc: *allo.Allocator) Result[slice.
     ret ok[slice.Slice[doc.MorphTarget], str](slice.make[doc.MorphTarget](data, n));
 }
 
-# parse_primitive: read one mesh primitive.
+# read one mesh primitive
 fun parse_primitive(e: *json.Value, alloc: *allo.Allocator) Result[doc.Primitive, str] {
     var p: doc.Primitive;
     p.indices = get_index(e, "indices");
@@ -328,7 +328,7 @@ fun parse_primitive(e: *json.Value, alloc: *allo.Allocator) Result[doc.Primitive
     ret ok[doc.Primitive, str](p);
 }
 
-# parse_mesh: read one mesh and its primitives.
+# read one mesh and its primitives
 fun parse_mesh(e: *json.Value, alloc: *allo.Allocator) Result[doc.Mesh, str] {
     var m: doc.Mesh;
     m.name = get_str(e, "name");
@@ -363,7 +363,7 @@ fun parse_mesh(e: *json.Value, alloc: *allo.Allocator) Result[doc.Mesh, str] {
     ret ok[doc.Mesh, str](m);
 }
 
-# parse_node: read one scene-graph node.
+# read one scene-graph node
 fun parse_node(e: *json.Value, alloc: *allo.Allocator) Result[doc.Node, str] {
     var nd: doc.Node;
     nd.mesh = get_index(e, "mesh");
@@ -396,7 +396,7 @@ fun parse_node(e: *json.Value, alloc: *allo.Allocator) Result[doc.Node, str] {
     ret ok[doc.Node, str](nd);
 }
 
-# parse_scene: read one scene.
+# read one scene
 fun parse_scene(e: *json.Value, alloc: *allo.Allocator) Result[doc.Scene, str] {
     var s: doc.Scene;
     s.name = get_str(e, "name");
@@ -406,7 +406,7 @@ fun parse_scene(e: *json.Value, alloc: *allo.Allocator) Result[doc.Scene, str] {
     ret ok[doc.Scene, str](s);
 }
 
-# parse_pbr: read a material's metallic-roughness parameters.
+# read a material's metallic-roughness parameters
 fun parse_pbr(mat: *json.Value) doc.PbrMetallicRoughness {
     var p: doc.PbrMetallicRoughness;
     p.base_color_factor[0] = 1.0f32; p.base_color_factor[1] = 1.0f32;
@@ -428,14 +428,14 @@ fun parse_pbr(mat: *json.Value) doc.PbrMetallicRoughness {
     ret p;
 }
 
-# alpha_mode: map a glTF alpha mode string to an AlphaMode, default OPAQUE.
+# map a glTF alpha mode string to an AlphaMode, default OPAQUE
 fun alpha_mode(v: StrView) doc.AlphaMode {
     if (view_eq(v, "MASK"))  { ret doc.ALPHA_MASK; }
     if (view_eq(v, "BLEND")) { ret doc.ALPHA_BLEND; }
     ret doc.ALPHA_OPAQUE;
 }
 
-# parse_material: read one material.
+# read one material
 fun parse_material(e: *json.Value) doc.Material {
     var mt: doc.Material;
     mt.pbr = parse_pbr(e);
@@ -458,7 +458,7 @@ fun parse_material(e: *json.Value) doc.Material {
     ret mt;
 }
 
-# parse_texture: read one texture.
+# read one texture
 fun parse_texture(e: *json.Value) doc.Texture {
     var t: doc.Texture;
     t.source = get_index(e, "source");
@@ -467,7 +467,7 @@ fun parse_texture(e: *json.Value) doc.Texture {
     ret t;
 }
 
-# parse_image: read one image.
+# read one image
 fun parse_image(e: *json.Value) doc.Image {
     var im: doc.Image;
     im.uri = get_str(e, "uri");
@@ -477,7 +477,7 @@ fun parse_image(e: *json.Value) doc.Image {
     ret im;
 }
 
-# parse_sampler: read one sampler.
+# read one sampler
 fun parse_sampler(e: *json.Value) doc.Sampler {
     var sm: doc.Sampler;
     sm.mag_filter = get_index(e, "magFilter");
@@ -488,7 +488,7 @@ fun parse_sampler(e: *json.Value) doc.Sampler {
     ret sm;
 }
 
-# parse_skin: read one skin.
+# read one skin
 fun parse_skin(e: *json.Value, alloc: *allo.Allocator) Result[doc.Skin, str] {
     var sk: doc.Skin;
     sk.inverse_bind_matrices = get_index(e, "inverseBindMatrices");
@@ -500,14 +500,14 @@ fun parse_skin(e: *json.Value, alloc: *allo.Allocator) Result[doc.Skin, str] {
     ret ok[doc.Skin, str](sk);
 }
 
-# interpolation: map a glTF interpolation string to an Interpolation, default LINEAR.
+# map a glTF interpolation string to an Interpolation, default LINEAR
 fun interpolation(v: StrView) doc.Interpolation {
     if (view_eq(v, "STEP"))        { ret doc.INTERP_STEP; }
     if (view_eq(v, "CUBICSPLINE")) { ret doc.INTERP_CUBICSPLINE; }
     ret doc.INTERP_LINEAR;
 }
 
-# target_path: map a glTF channel target path string to a TargetPath, default TRANSLATION.
+# map a glTF channel target path string to a TargetPath, default TRANSLATION
 fun target_path(v: StrView) doc.TargetPath {
     if (view_eq(v, "rotation")) { ret doc.PATH_ROTATION; }
     if (view_eq(v, "scale"))    { ret doc.PATH_SCALE; }
@@ -515,7 +515,7 @@ fun target_path(v: StrView) doc.TargetPath {
     ret doc.PATH_TRANSLATION;
 }
 
-# parse_anim_samplers: read an animation's sampler array.
+# read an animation's sampler array
 fun parse_anim_samplers(anim: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.AnimationSampler], str] {
     val arr: *json.Value = json.value_find(anim, "samplers");
     if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[doc.AnimationSampler], str](slice.make[doc.AnimationSampler](nil, 0)); }
@@ -539,7 +539,7 @@ fun parse_anim_samplers(anim: *json.Value, alloc: *allo.Allocator) Result[slice.
     ret ok[slice.Slice[doc.AnimationSampler], str](slice.make[doc.AnimationSampler](data, n));
 }
 
-# parse_anim_channels: read an animation's channel array.
+# read an animation's channel array
 fun parse_anim_channels(anim: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.AnimationChannel], str] {
     val arr: *json.Value = json.value_find(anim, "channels");
     if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[doc.AnimationChannel], str](slice.make[doc.AnimationChannel](nil, 0)); }
@@ -568,7 +568,7 @@ fun parse_anim_channels(anim: *json.Value, alloc: *allo.Allocator) Result[slice.
     ret ok[slice.Slice[doc.AnimationChannel], str](slice.make[doc.AnimationChannel](data, n));
 }
 
-# parse_animation: read one animation.
+# read one animation
 fun parse_animation(e: *json.Value, alloc: *allo.Allocator) Result[doc.Animation, str] {
     var an: doc.Animation;
     an.name = get_str(e, "name");
@@ -581,7 +581,7 @@ fun parse_animation(e: *json.Value, alloc: *allo.Allocator) Result[doc.Animation
     ret ok[doc.Animation, str](an);
 }
 
-# fill_buffers: populate the buffer, buffer view, and accessor arrays.
+# populate the buffer, buffer view, and accessor arrays
 fun fill_buffers(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Result[bool, str] {
     val ba: *json.Value = json.value_find(root, "buffers");
     if (ba != nil && json.value_is_array(ba)) {
@@ -635,7 +635,7 @@ fun fill_buffers(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Re
     ret ok[bool, str](true);
 }
 
-# fill_arrays: populate the scene-graph, mesh, material, and animation arrays.
+# populate the scene-graph, mesh, material, and animation arrays
 fun fill_arrays(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Result[bool, str] {
     val sa: *json.Value = json.value_find(root, "scenes");
     if (sa != nil && json.value_is_array(sa)) {
@@ -793,7 +793,7 @@ fun fill_arrays(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Res
     ret ok[bool, str](true);
 }
 
-# parse_document: parse a glTF JSON document into a Document.
+# parse a glTF JSON document into a Document
 #
 # json_bytes and the allocator must outlive the returned document: strings are
 # borrowed from json_bytes and all arrays are allocated from alloc.
@@ -819,7 +819,7 @@ pub fun parse_document(json_bytes: *u8, len: usize, alloc: *allo.Allocator) Resu
     ret ok[doc.Document, str](d);
 }
 
-# load_glb: parse a .glb container into a document plus its BIN buffer.
+# parse a .glb container into a document plus its BIN buffer
 # ---
 # data:  the .glb bytes
 # len:   length of data in bytes
@@ -840,7 +840,7 @@ pub fun load_glb(data: *u8, len: usize, alloc: *allo.Allocator) Result[Loaded, s
     ret ok[Loaded, str](out);
 }
 
-# append_cstr: copy a null-terminated string into out at off, returning the new offset.
+# copy a null-terminated string into out at off, returning the new offset
 fun append_cstr(out: *u8, off: usize, s: str) usize {
     var i: usize = 0;
     for (s[i] != 0) {
@@ -850,7 +850,8 @@ fun append_cstr(out: *u8, off: usize, s: str) usize {
     ret off + i;
 }
 
-# assemble_glb: pack JSON bytes and BIN bytes into a .glb buffer.
+# pack JSON bytes and BIN bytes into a .glb buffer
+#
 # the JSON chunk is space-padded and the BIN chunk zero-padded to 4-byte
 # alignment, matching the container specification.
 fun assemble_glb(out: *u8, json: *u8, json_len: usize, bin: *u8, bin_len: usize) usize {
@@ -881,7 +882,7 @@ fun assemble_glb(out: *u8, json: *u8, json_len: usize, bin: *u8, bin_len: usize)
     ret total;
 }
 
-# fixture_json: build a glTF document exercising integer and float fields into dst.
+# build a glTF document exercising integer and float fields into dst
 # ---
 # dst: destination buffer for the JSON bytes
 # ret: number of bytes written
@@ -901,7 +902,7 @@ fun fixture_json(dst: *u8) usize {
     ret o;
 }
 
-# fixture_bin: three vec3 float positions (1..9) then three u16 indices (0,1,2).
+# three vec3 float positions (1..9) then three u16 indices (0,1,2)
 fun fixture_bin(b: *u8) usize {
     bytes.write_f32(b, 0, 1.0f32);
     bytes.write_f32(b, 4, 2.0f32);

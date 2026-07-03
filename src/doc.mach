@@ -1,4 +1,4 @@
-# gltf.doc: the in-memory glTF 2.0 document model.
+# the in-memory glTF 2.0 document model
 #
 # typed records mirroring the glTF top-level arrays and their cross-references.
 # indices between arrays are stored as i64 with NONE marking an absent optional
@@ -12,10 +12,10 @@ use std.types.size.usize;
 use std.types.string.StrView;
 use slice: std.collections.slice;
 
-# NONE: sentinel for an absent optional index (glTF indices are non-negative).
+# sentinel for an absent optional index (glTF indices are non-negative)
 pub val NONE: i64 = -1;
 
-# ComponentType: glTF accessor component type (an OpenGL scalar type enum).
+# glTF accessor component type (an OpenGL scalar type enum)
 pub def ComponentType: u32;
 pub val COMPONENT_BYTE:           ComponentType = 5120;
 pub val COMPONENT_UNSIGNED_BYTE:  ComponentType = 5121;
@@ -24,7 +24,7 @@ pub val COMPONENT_UNSIGNED_SHORT: ComponentType = 5123;
 pub val COMPONENT_UNSIGNED_INT:   ComponentType = 5125;
 pub val COMPONENT_FLOAT:          ComponentType = 5126;
 
-# AccessorType: glTF accessor element shape (SCALAR through MAT4).
+# glTF accessor element shape (SCALAR through MAT4)
 pub def AccessorType: u8;
 pub val TYPE_SCALAR: AccessorType = 0;
 pub val TYPE_VEC2:   AccessorType = 1;
@@ -34,7 +34,7 @@ pub val TYPE_MAT2:   AccessorType = 4;
 pub val TYPE_MAT3:   AccessorType = 5;
 pub val TYPE_MAT4:   AccessorType = 6;
 
-# PrimitiveMode: glTF primitive topology (an OpenGL draw-mode enum).
+# glTF primitive topology (an OpenGL draw-mode enum)
 pub def PrimitiveMode: u32;
 pub val MODE_POINTS:         PrimitiveMode = 0;
 pub val MODE_LINES:          PrimitiveMode = 1;
@@ -44,29 +44,29 @@ pub val MODE_TRIANGLES:      PrimitiveMode = 4;
 pub val MODE_TRIANGLE_STRIP: PrimitiveMode = 5;
 pub val MODE_TRIANGLE_FAN:   PrimitiveMode = 6;
 
-# Interpolation: animation sampler interpolation mode.
+# animation sampler interpolation mode
 pub def Interpolation: u8;
 pub val INTERP_LINEAR:      Interpolation = 0;
 pub val INTERP_STEP:        Interpolation = 1;
 pub val INTERP_CUBICSPLINE: Interpolation = 2;
 
-# TargetPath: the node property an animation channel drives.
+# the node property an animation channel drives
 pub def TargetPath: u8;
 pub val PATH_TRANSLATION: TargetPath = 0;
 pub val PATH_ROTATION:    TargetPath = 1;
 pub val PATH_SCALE:       TargetPath = 2;
 pub val PATH_WEIGHTS:     TargetPath = 3;
 
-# AlphaMode: material alpha interpretation.
+# material alpha interpretation
 pub def AlphaMode: u8;
 pub val ALPHA_OPAQUE: AlphaMode = 0;
 pub val ALPHA_MASK:   AlphaMode = 1;
 pub val ALPHA_BLEND:  AlphaMode = 2;
 
-# MAX_COMPONENTS: the largest accessor element (MAT4) has 16 components.
+# the largest accessor element (MAT4) has 16 components
 pub val MAX_COMPONENTS: usize = 16;
 
-# component_count: number of scalar components in an accessor element type.
+# number of scalar components in an accessor element type
 # ---
 # ret: 1..16 for a known type, 0 for an unrecognized value
 pub fun component_count(t: AccessorType) usize {
@@ -80,7 +80,7 @@ pub fun component_count(t: AccessorType) usize {
     ret 0;
 }
 
-# component_size: byte width of a single accessor component.
+# byte width of a single accessor component
 # ---
 # ret: 1, 2, or 4 for a known component type, 0 for an unrecognized value
 pub fun component_size(c: ComponentType) usize {
@@ -93,7 +93,7 @@ pub fun component_size(c: ComponentType) usize {
     ret 0;
 }
 
-# Asset: document metadata from the required top-level `asset` object.
+# document metadata from the required top-level `asset` object
 # ---
 # version:     glTF version string (e.g. "2.0")
 # min_version: minimum version a client must support, empty when absent
@@ -106,7 +106,7 @@ pub rec Asset {
     copyright:   StrView;
 }
 
-# Buffer: a block of binary data referenced by buffer views.
+# a block of binary data referenced by buffer views
 # ---
 # byte_length: length of the buffer in bytes
 # uri:         source URI, empty for the GLB BIN buffer (index 0)
@@ -117,7 +117,7 @@ pub rec Buffer {
     name:        StrView;
 }
 
-# BufferView: a typed window into a buffer.
+# a typed window into a buffer
 # ---
 # buffer:      index of the source buffer
 # byte_offset: start offset into the buffer
@@ -134,7 +134,7 @@ pub rec BufferView {
     name:        StrView;
 }
 
-# Accessor: a typed view over a buffer view's bytes as element data.
+# a typed view over a buffer view's bytes as element data
 # ---
 # buffer_view:    index of the source buffer view, or NONE
 # byte_offset:    start offset relative to the buffer view
@@ -163,21 +163,21 @@ pub rec Accessor {
     name:           StrView;
 }
 
-# element_size: byte size of one accessor element (component_count * component_size).
+# byte size of one accessor element (component_count * component_size)
 # ---
 # ret: element size in bytes, or 0 when the accessor's type or component is unrecognized
 pub fun element_size(a: *Accessor) usize {
     ret component_count(a.element_type) * component_size(a.component_type);
 }
 
-# scalar_count: total number of scalar components an accessor yields (count * component_count).
+# total number of scalar components an accessor yields (count * component_count)
 #
 # the size a reader's output buffer must have to hold the accessor's data.
 pub fun scalar_count(a: *Accessor) usize {
     ret a.count * component_count(a.element_type);
 }
 
-# Attribute: one vertex attribute binding, a semantic name to an accessor index.
+# one vertex attribute binding, a semantic name to an accessor index
 # ---
 # name:     attribute semantic (e.g. "POSITION", "NORMAL", "TEXCOORD_0")
 # accessor: index of the accessor supplying the attribute's data
@@ -186,14 +186,14 @@ pub rec Attribute {
     accessor: i64;
 }
 
-# MorphTarget: a primitive morph target, its own set of attribute bindings.
+# a primitive morph target, its own set of attribute bindings
 # ---
 # attributes: the target's displaced attributes (POSITION, NORMAL, TANGENT)
 pub rec MorphTarget {
     attributes: slice.Slice[Attribute];
 }
 
-# Primitive: one drawable unit of a mesh.
+# one drawable unit of a mesh
 # ---
 # attributes: vertex attribute bindings
 # targets:    morph targets, empty when absent
@@ -208,7 +208,7 @@ pub rec Primitive {
     mode:       PrimitiveMode;
 }
 
-# Mesh: a set of primitives sharing a node's transform.
+# a set of primitives sharing a node's transform
 # ---
 # primitives: the mesh's drawable primitives
 # weights:    default morph target weights, empty when absent
@@ -219,7 +219,7 @@ pub rec Mesh {
     name:       StrView;
 }
 
-# Node: a scene-graph node with a local transform and optional attachments.
+# a scene-graph node with a local transform and optional attachments
 # ---
 # children:    indices of child nodes
 # mesh:        attached mesh index, or NONE
@@ -246,7 +246,7 @@ pub rec Node {
     name:        StrView;
 }
 
-# Scene: a set of root nodes to instantiate together.
+# a set of root nodes to instantiate together
 # ---
 # nodes: indices of the scene's root nodes
 # name:  user-defined name, empty when absent
@@ -255,7 +255,7 @@ pub rec Scene {
     name:  StrView;
 }
 
-# TextureRef: a material's reference to a texture and its UV set.
+# a material's reference to a texture and its UV set
 # ---
 # index:     texture index, or NONE when the reference is absent
 # tex_coord: TEXCOORD attribute set index, spec default 0
@@ -264,7 +264,7 @@ pub rec TextureRef {
     tex_coord: i64;
 }
 
-# PbrMetallicRoughness: the metallic-roughness PBR parameter set.
+# the metallic-roughness PBR parameter set
 # ---
 # base_color_factor:          linear RGBA base color multiplier, default (1,1,1,1)
 # base_color_texture:         base color texture reference
@@ -279,7 +279,7 @@ pub rec PbrMetallicRoughness {
     metallic_roughness_texture: TextureRef;
 }
 
-# Material: surface appearance parameters.
+# surface appearance parameters
 # ---
 # pbr:                metallic-roughness parameters
 # normal_texture:     tangent-space normal map reference
@@ -306,7 +306,7 @@ pub rec Material {
     name:               StrView;
 }
 
-# Texture: a sampled image, pairing an image source with a sampler.
+# a sampled image, pairing an image source with a sampler
 # ---
 # source:  image index, or NONE
 # sampler: sampler index, or NONE (use default sampling)
@@ -317,7 +317,7 @@ pub rec Texture {
     name:    StrView;
 }
 
-# Image: image data referenced by a texture.
+# image data referenced by a texture
 # ---
 # uri:         source URI, empty when sourced from a buffer view
 # mime_type:   MIME type, relevant for buffer-view-sourced images
@@ -330,7 +330,7 @@ pub rec Image {
     name:        StrView;
 }
 
-# Sampler: texture filtering and wrapping parameters.
+# texture filtering and wrapping parameters
 # ---
 # mag_filter: magnification filter enum, or NONE
 # min_filter: minification filter enum, or NONE
@@ -345,7 +345,7 @@ pub rec Sampler {
     name:       StrView;
 }
 
-# Skin: joint hierarchy and bind data for skeletal animation.
+# joint hierarchy and bind data for skeletal animation
 # ---
 # inverse_bind_matrices: accessor index of the inverse bind matrices, or NONE
 # skeleton:              index of the common root node, or NONE
@@ -358,7 +358,7 @@ pub rec Skin {
     name:                  StrView;
 }
 
-# AnimationSampler: a keyframe interpolation source for an animation.
+# a keyframe interpolation source for an animation
 # ---
 # input:         accessor index of keyframe input times
 # output:        accessor index of keyframe output values
@@ -369,7 +369,7 @@ pub rec AnimationSampler {
     interpolation: Interpolation;
 }
 
-# AnimationChannel: a binding of a sampler to a target node property.
+# a binding of a sampler to a target node property
 # ---
 # sampler:     index of the driving sampler within the animation
 # target_node: driven node index, or NONE
@@ -380,7 +380,7 @@ pub rec AnimationChannel {
     target_path: TargetPath;
 }
 
-# Animation: a set of channels and the samplers they reference.
+# a set of channels and the samplers they reference
 # ---
 # samplers: keyframe samplers
 # channels: channel bindings into the samplers
@@ -391,7 +391,7 @@ pub rec Animation {
     name:     StrView;
 }
 
-# Document: the parsed glTF asset, holding every top-level array.
+# the parsed glTF asset, holding every top-level array
 # ---
 # asset:        document metadata
 # scene:        default scene index, or NONE
