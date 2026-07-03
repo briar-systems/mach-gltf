@@ -59,25 +59,36 @@ deliberately out of scope here so the loader stays engine-agnostic.
 JSON parsing is a prerequisite: the `.gltf` document and the `.glb` JSON chunk
 are both JSON, and it comes from the standard library
 ([`std.data.json`](https://github.com/briar-systems/mach-std)) rather than an
-in-tree parser. One gap blocks full numeric loading today — `std.data.json`
-parses **integer numbers only**, and glTF's transforms, accessor bounds,
-animation keyframes, and vertex data are floating-point. Float number support
-must land in `mach-std`'s JSON parser before the loader can read those values;
-the fix belongs there, not in a private parser here.
+in-tree parser. `std.data.json` now parses the full RFC 8259 number grammar, so
+glTF's floating-point values — node transforms, accessor bounds, and material
+factors — load directly; the lockfile pins a `mach-std` commit carrying that
+support.
+
+## Status
+
+The structural loader is in place: the `.glb` container, the typed document
+model for every core top-level array, JSON parsing into that model (integer and
+float fields), and binary accessor readers over buffer bytes. What is not yet
+implemented: reading `.gltf` (external `.bin` and `data:` URI buffers) — only
+the `.glb` JSON chunk and BIN buffer are wired today — and the animation runtime
+(deliberately out of scope, see above).
 
 ## Architecture
 
 ```
 src/
-  glb.mach    the .glb binary container: magic, chunk tags, header layout
-  gltf.mach   library surface: re-exports every public symbol under `gltf.*`
+  bytes.mach     little-endian scalar read/write primitives over byte buffers
+  glb.mach       the .glb binary container: header, chunk iteration, validation
+  doc.mach       the typed glTF 2.0 document model and accessor-layout helpers
+  parse.mach     JSON to document model, plus the load_glb convenience entry
+  accessor.mach  typed, bounds-checked reads of accessor data out of buffer bytes
+  gltf.mach      library surface: re-exports every public symbol under `gltf.*`
 ```
 
 The surface (`gltf.mach`) is what `[project].module = "gltf.mach"` binds, so a
 bare `use gltf;` reaches the whole API. It also carries `use std.runtime;` so a
-library `mach test` links a runnable binary. New modules (JSON document schema,
-accessor decoding, `.gltf`/`.glb` readers) forward through this surface as they
-land.
+library `mach test` links a runnable binary. New modules (a `.gltf` reader)
+forward through this surface as they land.
 
 ## Multiplatform
 
@@ -90,7 +101,10 @@ target.
 
 ## Tests
 
-`test` blocks live beside the code they cover and are display-free: they pin
-the container tags and header layout against the glTF 2.0 specification. As the
-loader grows, parsing is exercised against in-tree sample assets under the same
-`mach test .`, with no external fixtures or system dependencies.
+`test` blocks live beside the code they cover and are display-free. They pin the
+container tags and header layout against the glTF 2.0 specification, build
+synthetic `.glb` fixtures as bytes in test code — integer and float JSON with a
+BIN chunk of known `float32` data — and assert the parsed document structure,
+exact accessor reads, and rejection of malformed containers and out-of-bounds
+accessors. Everything runs under `mach test .` with no external fixtures or
+system dependencies.
