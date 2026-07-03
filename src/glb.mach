@@ -3,10 +3,22 @@
 # a .glb file is a 12-byte header followed by length-prefixed chunks. the
 # first chunk is always JSON (the glTF document); an optional second chunk
 # (BIN) carries the binary buffer referenced by the document. this module
-# defines the on-disk tags and header layout; chunk walking and document
-# parsing land on top of it as the loader grows.
+# defines the on-disk tags, the header layout, chunk iteration, and the
+# container-level validation that turns an untrusted byte buffer into the
+# JSON and BIN spans the rest of the loader consumes.
 
 use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.types.string.str;
+use bytes: gltf.bytes;
 
 # MAGIC: the .glb file magic, the ASCII bytes "glTF" read little-endian.
 pub val MAGIC: u32 = 0x46546C67;
@@ -20,6 +32,12 @@ pub val CHUNK_JSON: u32 = 0x4E4F534A;
 # CHUNK_BIN: chunk type tag for the binary buffer, ASCII "BIN\0".
 pub val CHUNK_BIN: u32 = 0x004E4942;
 
+# HEADER_SIZE: byte length of the fixed .glb header.
+pub val HEADER_SIZE: usize = 12;
+
+# CHUNK_HEADER_SIZE: byte length of a chunk's length+type prefix.
+pub val CHUNK_HEADER_SIZE: usize = 8;
+
 # Header: the 12-byte .glb file header, matching the on-disk layout.
 # ---
 # magic:   must equal MAGIC for a valid container
@@ -31,9 +49,160 @@ pub rec Header {
     length:  u32;
 }
 
+# Chunk: a single .glb chunk: its type tag and a borrowed view over its data.
+# ---
+# kind: chunk type tag (CHUNK_JSON, CHUNK_BIN, or an unknown extension tag)
+# data: pointer into the source buffer at the chunk's first data byte
+# len:  chunk data length in bytes, excluding the 8-byte chunk header
+pub rec Chunk {
+    kind: u32;
+    data: *u8;
+    len:  usize;
+}
+
+# ChunkIter: cursor for walking the chunk sequence after the header.
+# ---
+# src: the source buffer
+# end: authoritative end offset (the header's declared length)
+# pos: current offset into src
+pub rec ChunkIter {
+    src: *u8;
+    end: usize;
+    pos: usize;
+}
+
+# Glb: the two spans a parsed container yields.
+# ---
+# json:     pointer into the source at the JSON chunk's first byte
+# json_len: JSON chunk length in bytes
+# bin:      pointer to the BIN chunk's first byte, or nil when absent
+# bin_len:  BIN chunk length in bytes, or 0 when absent
+pub rec Glb {
+    json:     *u8;
+    json_len: usize;
+    bin:      *u8;
+    bin_len:  usize;
+}
+
 # is_valid: report whether a header carries the glTF 2.0 container magic and version.
 pub fun is_valid(h: *Header) bool {
     ret h.magic == MAGIC && h.version == VERSION;
+}
+
+# read_header: read and range-check the 12-byte container header.
+# ---
+# data: source buffer
+# len:  source length in bytes
+# ret:  the header, or an error when the buffer is too short
+pub fun read_header(data: *u8, len: usize) Result[Header, str] {
+    if (data == nil) { ret err[Header, str]("glb buffer is nil"); }
+    if (len < HEADER_SIZE) { ret err[Header, str]("buffer shorter than glb header"); }
+
+    var h: Header;
+    h.magic   = bytes.read_u32(data, 0);
+    h.version = bytes.read_u32(data, 4);
+    h.length  = bytes.read_u32(data, 8);
+    ret ok[Header, str](h);
+}
+
+# chunk_iter: begin walking chunks after validating the container header.
+#
+# the declared header length is authoritative for the chunk region: it must
+# fit within the supplied buffer, and every chunk is bounded by it. trailing
+# bytes beyond the declared length are ignored.
+# ---
+# data: source buffer
+# len:  source length in bytes
+# ret:  an iterator positioned at the first chunk, or an error
+pub fun chunk_iter(data: *u8, len: usize) Result[ChunkIter, str] {
+    val hr: Result[Header, str] = read_header(data, len);
+    if (is_err[Header, str](hr)) { ret err[ChunkIter, str](unwrap_err[Header, str](hr)); }
+    val h: Header = unwrap_ok[Header, str](hr);
+
+    if (!is_valid(?h)) { ret err[ChunkIter, str]("bad glb magic or version"); }
+
+    val total: usize = h.length::usize;
+    if (total < HEADER_SIZE) { ret err[ChunkIter, str]("header length smaller than header"); }
+    if (total > len) { ret err[ChunkIter, str]("header length exceeds buffer"); }
+
+    var it: ChunkIter;
+    it.src = data;
+    it.end = total;
+    it.pos = HEADER_SIZE;
+    ret ok[ChunkIter, str](it);
+}
+
+# chunk_next: advance the iterator to the next chunk.
+#
+# chunk data lengths are 4-byte aligned per the specification; a length that
+# is not, or that runs past the container end, is rejected as malformed.
+# ---
+# it:  iterator to advance
+# out: receives the next chunk when one is produced
+# ret: true when out was filled, false at the end of the chunk region, or an error
+pub fun chunk_next(it: *ChunkIter, out: *Chunk) Result[bool, str] {
+    if (it.pos >= it.end) { ret ok[bool, str](false); }
+    if (it.pos + CHUNK_HEADER_SIZE > it.end) { ret err[bool, str]("truncated chunk header"); }
+
+    val clen: usize = bytes.read_u32(it.src, it.pos)::usize;
+    val ckind: u32  = bytes.read_u32(it.src, it.pos + 4);
+    if (clen % 4 != 0) { ret err[bool, str]("chunk length not 4-byte aligned"); }
+
+    val dstart: usize = it.pos + CHUNK_HEADER_SIZE;
+    if (dstart + clen > it.end) { ret err[bool, str]("chunk data exceeds container"); }
+
+    out.kind = ckind;
+    out.data = (it.src::usize + dstart)::*u8;
+    out.len  = clen;
+    it.pos = dstart + clen;
+    ret ok[bool, str](true);
+}
+
+# parse_glb: validate a .glb buffer and extract its JSON and optional BIN spans.
+#
+# the first chunk must be JSON; the first BIN chunk supplies the binary buffer.
+# unknown chunk types are ignored, as the specification directs.
+# ---
+# data: source buffer
+# len:  source length in bytes
+# ret:  the JSON and BIN spans, or an error for any malformed container
+pub fun parse_glb(data: *u8, len: usize) Result[Glb, str] {
+    val ir: Result[ChunkIter, str] = chunk_iter(data, len);
+    if (is_err[ChunkIter, str](ir)) { ret err[Glb, str](unwrap_err[ChunkIter, str](ir)); }
+    var it: ChunkIter = unwrap_ok[ChunkIter, str](ir);
+
+    var g: Glb;
+    g.json = nil;
+    g.json_len = 0;
+    g.bin = nil;
+    g.bin_len = 0;
+
+    var seen_json: bool = false;
+    var seen_bin: bool = false;
+
+    for (true) {
+        var c: Chunk;
+        val nr: Result[bool, str] = chunk_next(?it, ?c);
+        if (is_err[bool, str](nr)) { ret err[Glb, str](unwrap_err[bool, str](nr)); }
+        if (!unwrap_ok[bool, str](nr)) { brk; }
+
+        if (!seen_json) {
+            if (c.kind != CHUNK_JSON) { ret err[Glb, str]("first chunk is not JSON"); }
+            g.json = c.data;
+            g.json_len = c.len;
+            seen_json = true;
+            cnt;
+        }
+
+        if (c.kind == CHUNK_BIN && !seen_bin) {
+            g.bin = c.data;
+            g.bin_len = c.len;
+            seen_bin = true;
+        }
+    }
+
+    if (!seen_json) { ret err[Glb, str]("container has no JSON chunk"); }
+    ret ok[Glb, str](g);
 }
 
 test "glb: container magic and chunk tags match the specification" {
@@ -56,5 +225,113 @@ test "glb: is_valid accepts a well-formed header and rejects a bad magic" {
     bad.version = VERSION;
     bad.length = 12;
     if (is_valid(?bad)) { ret 1; }
+    ret 0;
+}
+
+# build_container: write a minimal JSON+BIN .glb into buf and return its length.
+# json data is "{}  " (space-padded to 4) and bin data is four known bytes.
+fun build_container(buf: *u8) usize {
+    bytes.write_u32(buf, 0, MAGIC);
+    bytes.write_u32(buf, 4, VERSION);
+    bytes.write_u32(buf, 8, 36);
+
+    bytes.write_u32(buf, 12, 4);
+    bytes.write_u32(buf, 16, CHUNK_JSON);
+    buf[20] = '{';
+    buf[21] = '}';
+    buf[22] = ' ';
+    buf[23] = ' ';
+
+    bytes.write_u32(buf, 24, 4);
+    bytes.write_u32(buf, 28, CHUNK_BIN);
+    buf[32] = 0xDE;
+    buf[33] = 0xAD;
+    buf[34] = 0xBE;
+    buf[35] = 0xEF;
+    ret 36;
+}
+
+test "glb: parse_glb extracts the JSON and BIN spans" {
+    var buf: [36]u8;
+    val n: usize = build_container(?buf[0]);
+
+    val r: Result[Glb, str] = parse_glb(?buf[0], n);
+    if (is_err[Glb, str](r)) { ret 1; }
+    val g: Glb = unwrap_ok[Glb, str](r);
+
+    if (g.json_len != 4) { ret 1; }
+    if (g.json[0] != '{' || g.json[1] != '}') { ret 1; }
+    if (g.bin == nil) { ret 1; }
+    if (g.bin_len != 4) { ret 1; }
+    if (g.bin[0] != 0xDE || g.bin[3] != 0xEF) { ret 1; }
+    ret 0;
+}
+
+test "glb: parse_glb yields nil BIN when only a JSON chunk is present" {
+    var buf: [24]u8;
+    bytes.write_u32(?buf[0], 0, MAGIC);
+    bytes.write_u32(?buf[0], 4, VERSION);
+    bytes.write_u32(?buf[0], 8, 24);
+    bytes.write_u32(?buf[0], 12, 4);
+    bytes.write_u32(?buf[0], 16, CHUNK_JSON);
+    buf[20] = '{';
+    buf[21] = '}';
+    buf[22] = ' ';
+    buf[23] = ' ';
+
+    val r: Result[Glb, str] = parse_glb(?buf[0], 24);
+    if (is_err[Glb, str](r)) { ret 1; }
+    val g: Glb = unwrap_ok[Glb, str](r);
+    if (g.json_len != 4) { ret 1; }
+    if (g.bin != nil) { ret 1; }
+    if (g.bin_len != 0) { ret 1; }
+    ret 0;
+}
+
+test "glb: parse_glb rejects a bad magic" {
+    var buf: [36]u8;
+    build_container(?buf[0]);
+    bytes.write_u32(?buf[0], 0, 0);
+    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    ret 0;
+}
+
+test "glb: parse_glb rejects a header length past the buffer" {
+    var buf: [36]u8;
+    build_container(?buf[0]);
+    bytes.write_u32(?buf[0], 8, 64);
+    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    ret 0;
+}
+
+test "glb: parse_glb rejects a misaligned chunk length" {
+    var buf: [36]u8;
+    build_container(?buf[0]);
+    bytes.write_u32(?buf[0], 12, 3);
+    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    ret 0;
+}
+
+test "glb: parse_glb rejects a chunk running past the container" {
+    var buf: [36]u8;
+    build_container(?buf[0]);
+    bytes.write_u32(?buf[0], 12, 64);
+    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    ret 0;
+}
+
+test "glb: parse_glb rejects a first chunk that is not JSON" {
+    var buf: [36]u8;
+    build_container(?buf[0]);
+    bytes.write_u32(?buf[0], 16, CHUNK_BIN);
+    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    ret 0;
+}
+
+test "glb: parse_glb rejects a buffer shorter than the header" {
+    var buf: [8]u8;
+    bytes.write_u32(?buf[0], 0, MAGIC);
+    bytes.write_u32(?buf[0], 4, VERSION);
+    if (!is_err[Glb, str](parse_glb(?buf[0], 8))) { ret 1; }
     ret 0;
 }
