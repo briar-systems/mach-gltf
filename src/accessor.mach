@@ -1,4 +1,4 @@
-# gltf.accessor: typed reads of accessor data out of a buffer's bytes.
+# typed reads of accessor data out of a buffer's bytes
 #
 # an accessor names a typed, strided window into a buffer view's bytes; these
 # readers resolve that window against a document and a buffer's bytes (the BIN
@@ -18,10 +18,10 @@ use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
 use std.types.string.str;
 use bytes: gltf.bytes;
-use doc: gltf.doc;
+use doc:   gltf.doc;
 use slice: std.collections.slice;
 
-# Plan: a validated read layout for one accessor over a buffer's bytes.
+# a validated read layout for one accessor over a buffer's bytes
 # ---
 # base:           pointer to the first element's first byte
 # count:          number of elements
@@ -40,7 +40,7 @@ pub rec Plan {
     element_type:   doc.AccessorType;
 }
 
-# plan: resolve and bounds-check an accessor against a buffer's bytes.
+# resolve and bounds-check an accessor against a buffer's bytes
 #
 # the accessor's buffer view must lie within the buffer, the accessor within
 # the view, and all elements within the view once stride is applied. every
@@ -94,7 +94,7 @@ pub fun plan(d: *doc.Document, buffer: *u8, buffer_len: usize, accessor_index: u
     ret ok[Plan, str](p);
 }
 
-# read_f32: read a FLOAT accessor's components into a tightly packed f32 array.
+# read a FLOAT accessor's components into a tightly packed f32 array
 # ---
 # p:   a plan resolved by plan
 # out: destination for count*comps float values
@@ -117,7 +117,7 @@ pub fun read_f32(p: *Plan, out: *f32, cap: usize) Result[usize, str] {
     ret ok[usize, str](total);
 }
 
-# read_u32: read an UNSIGNED_INT accessor's components into a tightly packed u32 array.
+# read an UNSIGNED_INT accessor's components into a tightly packed u32 array
 # ---
 # p:   a plan resolved by plan
 # out: destination for count*comps u32 values
@@ -140,7 +140,7 @@ pub fun read_u32(p: *Plan, out: *u32, cap: usize) Result[usize, str] {
     ret ok[usize, str](total);
 }
 
-# read_u16: read an UNSIGNED_SHORT accessor's components into a tightly packed u16 array.
+# read an UNSIGNED_SHORT accessor's components into a tightly packed u16 array
 # ---
 # p:   a plan resolved by plan
 # out: destination for count*comps u16 values
@@ -163,7 +163,7 @@ pub fun read_u16(p: *Plan, out: *u16, cap: usize) Result[usize, str] {
     ret ok[usize, str](total);
 }
 
-# read_u8: read an UNSIGNED_BYTE accessor's components into a tightly packed u8 array.
+# read an UNSIGNED_BYTE accessor's components into a tightly packed u8 array
 # ---
 # p:   a plan resolved by plan
 # out: destination for count*comps u8 values
@@ -186,7 +186,7 @@ pub fun read_u8(p: *Plan, out: *u8, cap: usize) Result[usize, str] {
     ret ok[usize, str](total);
 }
 
-# build_doc: assemble a single-accessor document over one buffer view for tests.
+# assemble a single-accessor document over one buffer view for tests
 fun build_doc(bv: *doc.BufferView, a: *doc.Accessor, d: *doc.Document) {
     d.buffer_views = slice.make[doc.BufferView](bv, 1);
     d.accessors = slice.make[doc.Accessor](a, 1);

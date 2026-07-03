@@ -1,4 +1,4 @@
-# gltf.glb: the .glb binary container format.
+# the .glb binary container format
 #
 # a .glb file is a 12-byte header followed by length-prefixed chunks. the
 # first chunk is always JSON (the glTF document); an optional second chunk
@@ -20,25 +20,25 @@ use std.types.result.unwrap_err;
 use std.types.string.str;
 use bytes: gltf.bytes;
 
-# MAGIC: the .glb file magic, the ASCII bytes "glTF" read little-endian.
+# the .glb file magic, the ASCII bytes "glTF" read little-endian
 pub val MAGIC: u32 = 0x46546C67;
 
-# VERSION: the container version defined by glTF 2.0.
+# the container version defined by glTF 2.0
 pub val VERSION: u32 = 2;
 
-# CHUNK_JSON: chunk type tag for the JSON document, ASCII "JSON".
+# chunk type tag for the JSON document, ASCII "JSON"
 pub val CHUNK_JSON: u32 = 0x4E4F534A;
 
-# CHUNK_BIN: chunk type tag for the binary buffer, ASCII "BIN\0".
+# chunk type tag for the binary buffer, ASCII "BIN\0"
 pub val CHUNK_BIN: u32 = 0x004E4942;
 
-# HEADER_SIZE: byte length of the fixed .glb header.
+# byte length of the fixed .glb header
 pub val HEADER_SIZE: usize = 12;
 
-# CHUNK_HEADER_SIZE: byte length of a chunk's length+type prefix.
+# byte length of a chunk's length+type prefix
 pub val CHUNK_HEADER_SIZE: usize = 8;
 
-# Header: the 12-byte .glb file header, matching the on-disk layout.
+# the 12-byte .glb file header, matching the on-disk layout
 # ---
 # magic:   must equal MAGIC for a valid container
 # version: container version, 2 for glTF 2.0
@@ -49,7 +49,7 @@ pub rec Header {
     length:  u32;
 }
 
-# Chunk: a single .glb chunk: its type tag and a borrowed view over its data.
+# a single .glb chunk: its type tag and a borrowed view over its data
 # ---
 # kind: chunk type tag (CHUNK_JSON, CHUNK_BIN, or an unknown extension tag)
 # data: pointer into the source buffer at the chunk's first data byte
@@ -60,7 +60,7 @@ pub rec Chunk {
     len:  usize;
 }
 
-# ChunkIter: cursor for walking the chunk sequence after the header.
+# cursor for walking the chunk sequence after the header
 # ---
 # src: the source buffer
 # end: authoritative end offset (the header's declared length)
@@ -71,7 +71,7 @@ pub rec ChunkIter {
     pos: usize;
 }
 
-# Glb: the two spans a parsed container yields.
+# the two spans a parsed container yields
 # ---
 # json:     pointer into the source at the JSON chunk's first byte
 # json_len: JSON chunk length in bytes
@@ -84,12 +84,12 @@ pub rec Glb {
     bin_len:  usize;
 }
 
-# is_valid: report whether a header carries the glTF 2.0 container magic and version.
+# report whether a header carries the glTF 2.0 container magic and version
 pub fun is_valid(h: *Header) bool {
     ret h.magic == MAGIC && h.version == VERSION;
 }
 
-# read_header: read and range-check the 12-byte container header.
+# read and range-check the 12-byte container header
 # ---
 # data: source buffer
 # len:  source length in bytes
@@ -105,7 +105,7 @@ pub fun read_header(data: *u8, len: usize) Result[Header, str] {
     ret ok[Header, str](h);
 }
 
-# chunk_iter: begin walking chunks after validating the container header.
+# begin walking chunks after validating the container header
 #
 # the declared header length is authoritative for the chunk region: it must
 # fit within the supplied buffer, and every chunk is bounded by it. trailing
@@ -132,7 +132,7 @@ pub fun chunk_iter(data: *u8, len: usize) Result[ChunkIter, str] {
     ret ok[ChunkIter, str](it);
 }
 
-# chunk_next: advance the iterator to the next chunk.
+# advance the iterator to the next chunk
 #
 # chunk data lengths are 4-byte aligned per the specification; a length that
 # is not, or that runs past the container end, is rejected as malformed.
@@ -158,7 +158,7 @@ pub fun chunk_next(it: *ChunkIter, out: *Chunk) Result[bool, str] {
     ret ok[bool, str](true);
 }
 
-# parse_glb: validate a .glb buffer and extract its JSON and optional BIN spans.
+# validate a .glb buffer and extract its JSON and optional BIN spans
 #
 # the first chunk must be JSON; the first BIN chunk supplies the binary buffer.
 # unknown chunk types are ignored, as the specification directs.
@@ -228,7 +228,8 @@ test "glb: is_valid accepts a well-formed header and rejects a bad magic" {
     ret 0;
 }
 
-# build_container: write a minimal JSON+BIN .glb into buf and return its length.
+# write a minimal JSON+BIN .glb into buf and return its length
+#
 # json data is "{}  " (space-padded to 4) and bin data is four known bytes.
 fun build_container(buf: *u8) usize {
     bytes.write_u32(buf, 0, MAGIC);
