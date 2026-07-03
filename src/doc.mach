@@ -170,6 +170,13 @@ pub fun element_size(a: *Accessor) usize {
     ret component_count(a.element_type) * component_size(a.component_type);
 }
 
+# scalar_count: total number of scalar components an accessor yields (count * component_count).
+#
+# the size a reader's output buffer must have to hold the accessor's data.
+pub fun scalar_count(a: *Accessor) usize {
+    ret a.count * component_count(a.element_type);
+}
+
 # Attribute: one vertex attribute binding, a semantic name to an accessor index.
 # ---
 # name:     attribute semantic (e.g. "POSITION", "NORMAL", "TEXCOORD_0")

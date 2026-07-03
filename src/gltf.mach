@@ -7,6 +7,7 @@
 use gltf.glb;
 use gltf.doc;
 use gltf.parse;
+use gltf.accessor;
 # links the startup entrypoint so `mach test` over this library produces a binary.
 use std.runtime;
 
@@ -67,6 +68,7 @@ fwd doc.ALPHA_BLEND;
 fwd doc.component_count;
 fwd doc.component_size;
 fwd doc.element_size;
+fwd doc.scalar_count;
 fwd doc.Asset;
 fwd doc.Buffer;
 fwd doc.BufferView;
@@ -92,3 +94,10 @@ fwd doc.Document;
 fwd parse.Loaded;
 fwd parse.parse_document;
 fwd parse.load_glb;
+
+fwd accessor.Plan;
+fwd accessor.plan;
+fwd accessor.read_f32;
+fwd accessor.read_u32;
+fwd accessor.read_u16;
+fwd accessor.read_u8;
