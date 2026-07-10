@@ -1,7 +1,5 @@
 [project]
 id = "gltf"
-name = "Mach GLTF parser"
-description = "Mach GLTF parser library"
 version = "0.2.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -23,15 +21,19 @@ abi = "sysv64"
 
 [profile.debug]
 opt = 0
+debug = true
 
 [profile.release]
 opt = 2
+debug = false
 
 [artifact.gltf]
 kind = "static"
 entry = "gltf.mach"
 out = "lib/gltf"
 targets = ["*"]
+link = []
+need = []
 
 [dep.mach-std]
 git = "https://github.com/briar-systems/mach-std"
