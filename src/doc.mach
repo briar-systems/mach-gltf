@@ -9,7 +9,7 @@
 
 use std.types.bool.bool;
 use std.types.size.usize;
-use std.types.string.StrView;
+use gltf.strview.StrView;
 use slice: std.collections.slice;
 
 # sentinel for an absent optional index (glTF indices are non-negative)

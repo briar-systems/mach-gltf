@@ -1,0 +1,33 @@
+# a borrowed, length-counted slice of characters
+#
+# unlike `str` (a null-terminated `*char`), a view need not be
+# null-terminated, so it can name a sub-range of a larger buffer without
+# copying or mutating it. that is what lets this parser borrow every name and
+# string straight out of the source JSON instead of allocating a copy per
+# field.
+#
+# this lived in `std.types.string` until mach-std 25b7ba0 removed it. it is
+# defined here rather than pushed back into std because it has exactly one
+# consumer -- this parser -- and std dropped it deliberately.
+
+use std.types.char.char;
+use std.types.size.usize;
+
+# data: pointer to the first character (not owned)
+# len:  number of characters in the view
+pub rec StrView {
+    data: *char;
+    len:  usize;
+}
+
+# construct a view over `len` chars starting at `data`
+# ---
+# data: pointer to the first character; borrowed, not copied
+# len:  number of characters
+# ret:  the view
+pub fun view(data: *char, len: usize) StrView {
+    var v: StrView;
+    v.data = data;
+    v.len  = len;
+    ret v;
+}
