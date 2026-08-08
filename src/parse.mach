@@ -2,10 +2,15 @@
 #
 # walks a std.data.json Value tree into the typed gltf.doc records. numbers
 # come straight from the parser (integers via value_number, floats widened via
-# value_float), strings are borrowed as zero-copy StrViews into the input, and
-# every top-level array is allocated from the caller's allocator. the caller
-# owns that allocator and the JSON bytes; an arena freed wholesale is the
-# intended lifetime discipline, matching std.data.json's own Value tree.
+# value_float), strings are copied into owned null-terminated `str` from the
+# caller's allocator, and so is every array. nothing in the result points into
+# the JSON bytes, so the caller may free or reuse them as soon as parsing
+# returns. an arena freed wholesale is the intended lifetime discipline,
+# matching std.data.json's own Value tree.
+#
+# strings were borrowed views into the input until the document model was made
+# self-contained. borrowing cost nothing to produce and cost every consumer a
+# non-standard string type plus a lifetime tie to a buffer they did not own.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -13,8 +18,8 @@ use std.types.bool.false;
 use std.types.size.usize;
 use std.types.char.char;
 use std.types.string.str;
-use std.types.string.StrView;
-use std.types.string.view;
+use std.types.string.str_equals;
+use text: std.text.string;
 use std.types.result.Result;
 use std.types.result.ok;
 use std.types.result.err;
@@ -77,21 +82,33 @@ fun get_bool(obj: *json.Value, key: str, dflt: bool) bool {
     ret json.value_bool(m);
 }
 
-# read a string member as a borrowed view, empty when absent
-fun get_str(obj: *json.Value, key: str) StrView {
-    val m: *json.Value = json.value_find(obj, key);
-    if (m == nil) { ret view(nil, 0); }
-    if (!json.value_is_string(m)) { ret view(nil, 0); }
+# read a string member as an owned copy, an owned empty string when absent
+#
+# the JSON value carries a pointer and a length into the source bytes and is
+# not null-terminated, so this copies rather than borrows: str_dup_range takes
+# the length explicitly and never scans for a terminator.
+#
+# returns nil ONLY on allocation failure, never for an absent member. callers
+# allocate several strings in a row and test them together before returning,
+# which keeps the failure check to one line per record instead of three per
+# field.
+fun get_str(obj: *json.Value, key: str, alloc: *allo.Allocator) str {
     var len: usize = 0;
-    val p: *u8 = json.value_string(m, ?len);
-    ret view(p::*char, len);
+    var p:   *u8   = nil;
+    val m: *json.Value = json.value_find(obj, key);
+    if (m != nil && json.value_is_string(m)) { p = json.value_string(m, ?len); }
+    val r: Result[str, str] = text.str_dup_range(alloc, p::str, 0, len);
+    if (is_err[str, str](r)) { ret nil; }
+    ret unwrap_ok[str, str](r);
 }
 
-# the i-th object key as a borrowed view
-fun key_view(obj: *json.Value, i: usize) StrView {
-    val k: str = json.value_key(obj, i);
+# the i-th object key as an owned copy
+fun key_own(obj: *json.Value, i: usize, alloc: *allo.Allocator) str {
+    val k:    str   = json.value_key(obj, i);
     val klen: usize = json.value_key_len(obj, i);
-    ret view(k, klen);
+    val r: Result[str, str] = text.str_dup_range(alloc, k, 0, klen);
+    if (is_err[str, str](r)) { ret nil; }
+    ret unwrap_ok[str, str](r);
 }
 
 # copy up to cap numbers from a JSON array into out, returning the count
@@ -169,70 +186,63 @@ fun parse_texture_ref(obj: *json.Value, key: str) doc.TextureRef {
 }
 
 # read the top-level asset metadata
-fun parse_asset(root: *json.Value) doc.Asset {
+fun parse_asset(root: *json.Value, alloc: *allo.Allocator) Result[doc.Asset, str] {
     var a: doc.Asset;
-    a.version = view(nil, 0);
-    a.min_version = view(nil, 0);
-    a.generator = view(nil, 0);
-    a.copyright = view(nil, 0);
-    val m: *json.Value = json.value_find(root, "asset");
-    if (m == nil || !json.value_is_object(m)) { ret a; }
-    a.version = get_str(m, "version");
-    a.min_version = get_str(m, "minVersion");
-    a.generator = get_str(m, "generator");
-    a.copyright = get_str(m, "copyright");
-    ret a;
+    # a missing asset object still yields owned empty strings, so every field
+    # of a returned Document is a valid str regardless of what the input omitted
+    var m: *json.Value = json.value_find(root, "asset");
+    if (m != nil && !json.value_is_object(m)) { m = nil; }
+    a.version     = get_str(m, "version",    alloc);
+    a.min_version = get_str(m, "minVersion", alloc);
+    a.generator   = get_str(m, "generator",  alloc);
+    a.copyright   = get_str(m, "copyright",  alloc);
+    if (a.version == nil || a.min_version == nil || a.generator == nil || a.copyright == nil) {
+        ret err[doc.Asset, str]("out of memory reading asset strings");
+    }
+    ret ok[doc.Asset, str](a);
 }
 
 # read one buffer definition
-fun parse_buffer(e: *json.Value) doc.Buffer {
+fun parse_buffer(e: *json.Value, alloc: *allo.Allocator) Result[doc.Buffer, str] {
     var b: doc.Buffer;
     b.byte_length = get_usize(e, "byteLength", 0);
-    b.uri = get_str(e, "uri");
-    b.name = get_str(e, "name");
-    ret b;
+    b.uri  = get_str(e, "uri",  alloc);
+    b.name = get_str(e, "name", alloc);
+    if (b.uri == nil || b.name == nil) { ret err[doc.Buffer, str]("out of memory reading buffer strings"); }
+    ret ok[doc.Buffer, str](b);
 }
 
 # read one buffer view definition
-fun parse_buffer_view(e: *json.Value) doc.BufferView {
+fun parse_buffer_view(e: *json.Value, alloc: *allo.Allocator) Result[doc.BufferView, str] {
     var v: doc.BufferView;
     v.buffer = get_index(e, "buffer");
     v.byte_offset = get_usize(e, "byteOffset", 0);
     v.byte_length = get_usize(e, "byteLength", 0);
     v.byte_stride = get_usize(e, "byteStride", 0);
     v.target = get_index(e, "target");
-    v.name = get_str(e, "name");
-    ret v;
+    v.name = get_str(e, "name", alloc);
+    if (v.name == nil) { ret err[doc.BufferView, str]("out of memory reading bufferView name"); }
+    ret ok[doc.BufferView, str](v);
 }
 
 # map a glTF accessor type string to an AccessorType
 # ---
 # ret: the matching type, or an error for an unrecognized string
-fun accessor_type(v: StrView) Result[doc.AccessorType, str] {
-    if (view_eq(v, "SCALAR")) { ret ok[doc.AccessorType, str](doc.TYPE_SCALAR); }
-    if (view_eq(v, "VEC2"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC2); }
-    if (view_eq(v, "VEC3"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC3); }
-    if (view_eq(v, "VEC4"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC4); }
-    if (view_eq(v, "MAT2"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT2); }
-    if (view_eq(v, "MAT3"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT3); }
-    if (view_eq(v, "MAT4"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT4); }
+fun accessor_type(v: str) Result[doc.AccessorType, str] {
+    if (str_equals(v, "SCALAR")) { ret ok[doc.AccessorType, str](doc.TYPE_SCALAR); }
+    if (str_equals(v, "VEC2"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC2); }
+    if (str_equals(v, "VEC3"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC3); }
+    if (str_equals(v, "VEC4"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC4); }
+    if (str_equals(v, "MAT2"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT2); }
+    if (str_equals(v, "MAT3"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT3); }
+    if (str_equals(v, "MAT4"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT4); }
     ret err[doc.AccessorType, str]("unknown accessor type");
-}
-
-# compare a borrowed view against a null-terminated literal for byte equality
-fun view_eq(v: StrView, s: str) bool {
-    var i: usize = 0;
-    for (i < v.len) {
-        if (s[i] == 0 || v.data[i] != s[i]) { ret false; }
-        i = i + 1;
-    }
-    ret s[v.len] == 0;
 }
 
 # read one accessor definition, including optional min/max bounds
 # ---
 # ret: the accessor, or an error for an unrecognized element type
-fun parse_accessor(e: *json.Value) Result[doc.Accessor, str] {
+fun parse_accessor(e: *json.Value, alloc: *allo.Allocator) Result[doc.Accessor, str] {
     var a: doc.Accessor;
     a.buffer_view = get_index(e, "bufferView");
     a.byte_offset = get_usize(e, "byteOffset", 0);
@@ -242,9 +252,12 @@ fun parse_accessor(e: *json.Value) Result[doc.Accessor, str] {
     a.bounds_len = 0;
     a.has_min = false;
     a.has_max = false;
-    a.name = get_str(e, "name");
+    a.name = get_str(e, "name", alloc);
+    if (a.name == nil) { ret err[doc.Accessor, str]("out of memory reading accessor name"); }
 
-    val tr: Result[doc.AccessorType, str] = accessor_type(get_str(e, "type"));
+    val ty: str = get_str(e, "type", alloc);
+    if (ty == nil) { ret err[doc.Accessor, str]("out of memory reading accessor type"); }
+    val tr: Result[doc.AccessorType, str] = accessor_type(ty);
     if (is_err[doc.AccessorType, str](tr)) { ret err[doc.Accessor, str](unwrap_err[doc.AccessorType, str](tr)); }
     a.element_type = unwrap_ok[doc.AccessorType, str](tr);
 
@@ -275,7 +288,8 @@ fun parse_attributes(obj: *json.Value, alloc: *allo.Allocator) Result[slice.Slic
     var i: usize = 0;
     for (i < n) {
         var at: doc.Attribute;
-        at.name = key_view(obj, i);
+        at.name = key_own(obj, i, alloc);
+        if (at.name == nil) { ret err[slice.Slice[doc.Attribute], str]("out of memory reading attribute name"); }
         val cv: *json.Value = json.value_get(obj, i);
         if (cv != nil && json.value_is_number(cv)) {
             at.accessor = json.value_number(cv);
@@ -331,7 +345,8 @@ fun parse_primitive(e: *json.Value, alloc: *allo.Allocator) Result[doc.Primitive
 # read one mesh and its primitives
 fun parse_mesh(e: *json.Value, alloc: *allo.Allocator) Result[doc.Mesh, str] {
     var m: doc.Mesh;
-    m.name = get_str(e, "name");
+    m.name = get_str(e, "name", alloc);
+    if (m.name == nil) { ret err[doc.Mesh, str]("out of memory reading mesh name"); }
 
     val wr: Result[slice.Slice[f32], str] = parse_float_slice(e, "weights", alloc);
     if (is_err[slice.Slice[f32], str](wr)) { ret err[doc.Mesh, str](unwrap_err[slice.Slice[f32], str](wr)); }
@@ -369,7 +384,8 @@ fun parse_node(e: *json.Value, alloc: *allo.Allocator) Result[doc.Node, str] {
     nd.mesh = get_index(e, "mesh");
     nd.skin = get_index(e, "skin");
     nd.camera = get_index(e, "camera");
-    nd.name = get_str(e, "name");
+    nd.name = get_str(e, "name", alloc);
+    if (nd.name == nil) { ret err[doc.Node, str]("out of memory reading node name"); }
 
     nd.translation[0] = 0.0f32; nd.translation[1] = 0.0f32; nd.translation[2] = 0.0f32;
     nd.rotation[0] = 0.0f32; nd.rotation[1] = 0.0f32; nd.rotation[2] = 0.0f32; nd.rotation[3] = 1.0f32;
@@ -399,7 +415,8 @@ fun parse_node(e: *json.Value, alloc: *allo.Allocator) Result[doc.Node, str] {
 # read one scene
 fun parse_scene(e: *json.Value, alloc: *allo.Allocator) Result[doc.Scene, str] {
     var s: doc.Scene;
-    s.name = get_str(e, "name");
+    s.name = get_str(e, "name", alloc);
+    if (s.name == nil) { ret err[doc.Scene, str]("out of memory reading scene name"); }
     val nr: Result[slice.Slice[i64], str] = parse_index_slice(e, "nodes", alloc);
     if (is_err[slice.Slice[i64], str](nr)) { ret err[doc.Scene, str](unwrap_err[slice.Slice[i64], str](nr)); }
     s.nodes = unwrap_ok[slice.Slice[i64], str](nr);
@@ -429,14 +446,14 @@ fun parse_pbr(mat: *json.Value) doc.PbrMetallicRoughness {
 }
 
 # map a glTF alpha mode string to an AlphaMode, default OPAQUE
-fun alpha_mode(v: StrView) doc.AlphaMode {
-    if (view_eq(v, "MASK"))  { ret doc.ALPHA_MASK; }
-    if (view_eq(v, "BLEND")) { ret doc.ALPHA_BLEND; }
+fun alpha_mode(v: str) doc.AlphaMode {
+    if (str_equals(v, "MASK"))  { ret doc.ALPHA_MASK; }
+    if (str_equals(v, "BLEND")) { ret doc.ALPHA_BLEND; }
     ret doc.ALPHA_OPAQUE;
 }
 
 # read one material
-fun parse_material(e: *json.Value) doc.Material {
+fun parse_material(e: *json.Value, alloc: *allo.Allocator) Result[doc.Material, str] {
     var mt: doc.Material;
     mt.pbr = parse_pbr(e);
     mt.normal_texture = parse_texture_ref(e, "normalTexture");
@@ -447,45 +464,52 @@ fun parse_material(e: *json.Value) doc.Material {
     mt.emissive_factor[0] = 0.0f32; mt.emissive_factor[1] = 0.0f32; mt.emissive_factor[2] = 0.0f32;
     mt.alpha_cutoff = get_f32(e, "alphaCutoff", 0.5f32);
     mt.double_sided = get_bool(e, "doubleSided", false);
-    mt.alpha_mode = alpha_mode(get_str(e, "alphaMode"));
-    mt.name = get_str(e, "name");
+    val am: str = get_str(e, "alphaMode", alloc);
+    mt.name = get_str(e, "name", alloc);
+    if (am == nil || mt.name == nil) { ret err[doc.Material, str]("out of memory reading material strings"); }
+    mt.alpha_mode = alpha_mode(am);
 
     val nt: *json.Value = json.value_find(e, "normalTexture");
     if (nt != nil && json.value_is_object(nt)) { mt.normal_scale = get_f32(nt, "scale", 1.0f32); }
     val ot: *json.Value = json.value_find(e, "occlusionTexture");
     if (ot != nil && json.value_is_object(ot)) { mt.occlusion_strength = get_f32(ot, "strength", 1.0f32); }
     read_float_member(e, "emissiveFactor", ?mt.emissive_factor[0], 3);
-    ret mt;
+    ret ok[doc.Material, str](mt);
 }
 
 # read one texture
-fun parse_texture(e: *json.Value) doc.Texture {
+fun parse_texture(e: *json.Value, alloc: *allo.Allocator) Result[doc.Texture, str] {
     var t: doc.Texture;
     t.source = get_index(e, "source");
     t.sampler = get_index(e, "sampler");
-    t.name = get_str(e, "name");
-    ret t;
+    t.name = get_str(e, "name", alloc);
+    if (t.name == nil) { ret err[doc.Texture, str]("out of memory reading texture name"); }
+    ret ok[doc.Texture, str](t);
 }
 
 # read one image
-fun parse_image(e: *json.Value) doc.Image {
+fun parse_image(e: *json.Value, alloc: *allo.Allocator) Result[doc.Image, str] {
     var im: doc.Image;
-    im.uri = get_str(e, "uri");
-    im.mime_type = get_str(e, "mimeType");
+    im.uri         = get_str(e, "uri",      alloc);
+    im.mime_type   = get_str(e, "mimeType", alloc);
     im.buffer_view = get_index(e, "bufferView");
-    im.name = get_str(e, "name");
-    ret im;
+    im.name        = get_str(e, "name",     alloc);
+    if (im.uri == nil || im.mime_type == nil || im.name == nil) {
+        ret err[doc.Image, str]("out of memory reading image strings");
+    }
+    ret ok[doc.Image, str](im);
 }
 
 # read one sampler
-fun parse_sampler(e: *json.Value) doc.Sampler {
+fun parse_sampler(e: *json.Value, alloc: *allo.Allocator) Result[doc.Sampler, str] {
     var sm: doc.Sampler;
     sm.mag_filter = get_index(e, "magFilter");
     sm.min_filter = get_index(e, "minFilter");
     sm.wrap_s = get_i64(e, "wrapS", 10497);
     sm.wrap_t = get_i64(e, "wrapT", 10497);
-    sm.name = get_str(e, "name");
-    ret sm;
+    sm.name = get_str(e, "name", alloc);
+    if (sm.name == nil) { ret err[doc.Sampler, str]("out of memory reading sampler name"); }
+    ret ok[doc.Sampler, str](sm);
 }
 
 # read one skin
@@ -493,7 +517,8 @@ fun parse_skin(e: *json.Value, alloc: *allo.Allocator) Result[doc.Skin, str] {
     var sk: doc.Skin;
     sk.inverse_bind_matrices = get_index(e, "inverseBindMatrices");
     sk.skeleton = get_index(e, "skeleton");
-    sk.name = get_str(e, "name");
+    sk.name = get_str(e, "name", alloc);
+    if (sk.name == nil) { ret err[doc.Skin, str]("out of memory reading skin name"); }
     val jr: Result[slice.Slice[i64], str] = parse_index_slice(e, "joints", alloc);
     if (is_err[slice.Slice[i64], str](jr)) { ret err[doc.Skin, str](unwrap_err[slice.Slice[i64], str](jr)); }
     sk.joints = unwrap_ok[slice.Slice[i64], str](jr);
@@ -501,17 +526,17 @@ fun parse_skin(e: *json.Value, alloc: *allo.Allocator) Result[doc.Skin, str] {
 }
 
 # map a glTF interpolation string to an Interpolation, default LINEAR
-fun interpolation(v: StrView) doc.Interpolation {
-    if (view_eq(v, "STEP"))        { ret doc.INTERP_STEP; }
-    if (view_eq(v, "CUBICSPLINE")) { ret doc.INTERP_CUBICSPLINE; }
+fun interpolation(v: str) doc.Interpolation {
+    if (str_equals(v, "STEP"))        { ret doc.INTERP_STEP; }
+    if (str_equals(v, "CUBICSPLINE")) { ret doc.INTERP_CUBICSPLINE; }
     ret doc.INTERP_LINEAR;
 }
 
 # map a glTF channel target path string to a TargetPath, default TRANSLATION
-fun target_path(v: StrView) doc.TargetPath {
-    if (view_eq(v, "rotation")) { ret doc.PATH_ROTATION; }
-    if (view_eq(v, "scale"))    { ret doc.PATH_SCALE; }
-    if (view_eq(v, "weights"))  { ret doc.PATH_WEIGHTS; }
+fun target_path(v: str) doc.TargetPath {
+    if (str_equals(v, "rotation")) { ret doc.PATH_ROTATION; }
+    if (str_equals(v, "scale"))    { ret doc.PATH_SCALE; }
+    if (str_equals(v, "weights"))  { ret doc.PATH_WEIGHTS; }
     ret doc.PATH_TRANSLATION;
 }
 
@@ -532,7 +557,9 @@ fun parse_anim_samplers(anim: *json.Value, alloc: *allo.Allocator) Result[slice.
         var s: doc.AnimationSampler;
         s.input = get_index(e, "input");
         s.output = get_index(e, "output");
-        s.interpolation = interpolation(get_str(e, "interpolation"));
+        val ip: str = get_str(e, "interpolation", alloc);
+        if (ip == nil) { ret err[slice.Slice[doc.AnimationSampler], str]("out of memory reading interpolation"); }
+        s.interpolation = interpolation(ip);
         data[i] = s;
         i = i + 1;
     }
@@ -560,7 +587,9 @@ fun parse_anim_channels(anim: *json.Value, alloc: *allo.Allocator) Result[slice.
         val tgt: *json.Value = json.value_find(e, "target");
         if (tgt != nil && json.value_is_object(tgt)) {
             c.target_node = get_index(tgt, "node");
-            c.target_path = target_path(get_str(tgt, "path"));
+            val tp: str = get_str(tgt, "path", alloc);
+            if (tp == nil) { ret err[slice.Slice[doc.AnimationChannel], str]("out of memory reading target path"); }
+            c.target_path = target_path(tp);
         }
         data[i] = c;
         i = i + 1;
@@ -571,7 +600,8 @@ fun parse_anim_channels(anim: *json.Value, alloc: *allo.Allocator) Result[slice.
 # read one animation
 fun parse_animation(e: *json.Value, alloc: *allo.Allocator) Result[doc.Animation, str] {
     var an: doc.Animation;
-    an.name = get_str(e, "name");
+    an.name = get_str(e, "name", alloc);
+    if (an.name == nil) { ret err[doc.Animation, str]("out of memory reading animation name"); }
     val sr: Result[slice.Slice[doc.AnimationSampler], str] = parse_anim_samplers(e, alloc);
     if (is_err[slice.Slice[doc.AnimationSampler], str](sr)) { ret err[doc.Animation, str](unwrap_err[slice.Slice[doc.AnimationSampler], str](sr)); }
     an.samplers = unwrap_ok[slice.Slice[doc.AnimationSampler], str](sr);
@@ -592,7 +622,9 @@ fun fill_buffers(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Re
             val data: *doc.Buffer = unwrap_ok[*doc.Buffer, str](r);
             var i: usize = 0;
             for (i < n) {
-                data[i] = parse_buffer(json.value_get(ba, i));
+                val er: Result[doc.Buffer, str] = parse_buffer(json.value_get(ba, i), alloc);
+                if (is_err[doc.Buffer, str](er)) { ret err[bool, str](unwrap_err[doc.Buffer, str](er)); }
+                data[i] = unwrap_ok[doc.Buffer, str](er);
                 i = i + 1;
             }
             d.buffers = slice.make[doc.Buffer](data, n);
@@ -608,7 +640,9 @@ fun fill_buffers(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Re
             val data: *doc.BufferView = unwrap_ok[*doc.BufferView, str](r);
             var i: usize = 0;
             for (i < n) {
-                data[i] = parse_buffer_view(json.value_get(va, i));
+                val er: Result[doc.BufferView, str] = parse_buffer_view(json.value_get(va, i), alloc);
+                if (is_err[doc.BufferView, str](er)) { ret err[bool, str](unwrap_err[doc.BufferView, str](er)); }
+                data[i] = unwrap_ok[doc.BufferView, str](er);
                 i = i + 1;
             }
             d.buffer_views = slice.make[doc.BufferView](data, n);
@@ -624,7 +658,7 @@ fun fill_buffers(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Re
             val data: *doc.Accessor = unwrap_ok[*doc.Accessor, str](r);
             var i: usize = 0;
             for (i < n) {
-                val er: Result[doc.Accessor, str] = parse_accessor(json.value_get(aa, i));
+                val er: Result[doc.Accessor, str] = parse_accessor(json.value_get(aa, i), alloc);
                 if (is_err[doc.Accessor, str](er)) { ret err[bool, str](unwrap_err[doc.Accessor, str](er)); }
                 data[i] = unwrap_ok[doc.Accessor, str](er);
                 i = i + 1;
@@ -700,7 +734,9 @@ fun fill_arrays(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Res
             val data: *doc.Material = unwrap_ok[*doc.Material, str](r);
             var i: usize = 0;
             for (i < n) {
-                data[i] = parse_material(json.value_get(mta, i));
+                val er: Result[doc.Material, str] = parse_material(json.value_get(mta, i), alloc);
+                if (is_err[doc.Material, str](er)) { ret err[bool, str](unwrap_err[doc.Material, str](er)); }
+                data[i] = unwrap_ok[doc.Material, str](er);
                 i = i + 1;
             }
             d.materials = slice.make[doc.Material](data, n);
@@ -716,7 +752,9 @@ fun fill_arrays(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Res
             val data: *doc.Texture = unwrap_ok[*doc.Texture, str](r);
             var i: usize = 0;
             for (i < n) {
-                data[i] = parse_texture(json.value_get(ta, i));
+                val er: Result[doc.Texture, str] = parse_texture(json.value_get(ta, i), alloc);
+                if (is_err[doc.Texture, str](er)) { ret err[bool, str](unwrap_err[doc.Texture, str](er)); }
+                data[i] = unwrap_ok[doc.Texture, str](er);
                 i = i + 1;
             }
             d.textures = slice.make[doc.Texture](data, n);
@@ -732,7 +770,9 @@ fun fill_arrays(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Res
             val data: *doc.Image = unwrap_ok[*doc.Image, str](r);
             var i: usize = 0;
             for (i < n) {
-                data[i] = parse_image(json.value_get(ia, i));
+                val er: Result[doc.Image, str] = parse_image(json.value_get(ia, i), alloc);
+                if (is_err[doc.Image, str](er)) { ret err[bool, str](unwrap_err[doc.Image, str](er)); }
+                data[i] = unwrap_ok[doc.Image, str](er);
                 i = i + 1;
             }
             d.images = slice.make[doc.Image](data, n);
@@ -748,7 +788,9 @@ fun fill_arrays(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Res
             val data: *doc.Sampler = unwrap_ok[*doc.Sampler, str](r);
             var i: usize = 0;
             for (i < n) {
-                data[i] = parse_sampler(json.value_get(spa, i));
+                val er: Result[doc.Sampler, str] = parse_sampler(json.value_get(spa, i), alloc);
+                if (is_err[doc.Sampler, str](er)) { ret err[bool, str](unwrap_err[doc.Sampler, str](er)); }
+                data[i] = unwrap_ok[doc.Sampler, str](er);
                 i = i + 1;
             }
             d.samplers = slice.make[doc.Sampler](data, n);
@@ -809,7 +851,9 @@ pub fun parse_document(json_bytes: *u8, len: usize, alloc: *allo.Allocator) Resu
     if (!json.value_is_object(?root)) { ret err[doc.Document, str]("glTF root is not an object"); }
 
     var d: doc.Document;
-    d.asset = parse_asset(?root);
+    val asr: Result[doc.Asset, str] = parse_asset(?root, alloc);
+    if (is_err[doc.Asset, str](asr)) { ret err[doc.Document, str](unwrap_err[doc.Asset, str](asr)); }
+    d.asset = unwrap_ok[doc.Asset, str](asr);
     d.scene = get_index(?root, "scene");
 
     val br: Result[bool, str] = fill_buffers(?root, ?d, alloc);
@@ -935,7 +979,7 @@ test "parse: document structure from a synthetic .glb, including float fields" {
     val ld: Loaded = unwrap_ok[Loaded, str](lr);
     val d: doc.Document = ld.document;
 
-    if (!view_eq(d.asset.version, "2.0")) { ret 1; }
+    if (!str_equals(d.asset.version, "2.0")) { ret 1; }
     if (d.scene != 0) { ret 1; }
     if (d.scenes.size != 1 || d.nodes.size != 2) { ret 1; }
     if (d.scenes.data[0].nodes.size != 1 || d.scenes.data[0].nodes.data[0] != 0) { ret 1; }
@@ -952,7 +996,7 @@ test "parse: document structure from a synthetic .glb, including float fields" {
     if (d.meshes.size != 1) { ret 1; }
     val prim: *doc.Primitive = ?d.meshes.data[0].primitives.data[0];
     if (prim.attributes.size != 1) { ret 1; }
-    if (!view_eq(prim.attributes.data[0].name, "POSITION")) { ret 1; }
+    if (!str_equals(prim.attributes.data[0].name, "POSITION")) { ret 1; }
     if (prim.attributes.data[0].accessor != 0) { ret 1; }
     if (prim.indices != 1 || prim.material != 0) { ret 1; }
     if (prim.mode != doc.MODE_TRIANGLES) { ret 1; }
@@ -1026,5 +1070,35 @@ test "parse: parse_document rejects a non-object root" {
     page.make(?a);
     val src: str = "[1,2,3]";
     if (!is_err[doc.Document, str](parse_document(src::*u8, 7, ?a))) { ret 1; }
+    ret 0;
+}
+
+# the point of owning the strings: a Document must survive the JSON bytes it
+# came from. this scribbles over the whole source buffer after parsing and then
+# reads the strings back. against borrowed views every one of these comparisons
+# reads the scribble and fails, which is what makes this test worth having.
+test "parse: the document outlives the JSON buffer it was parsed from" {
+    var a: allo.Allocator;
+    page.make(?a);
+
+    var jbuf: [1024]u8;
+    val jl: usize = fixture_json(?jbuf[0]);
+
+    val dr: Result[doc.Document, str] = parse_document(?jbuf[0], jl, ?a);
+    if (is_err[doc.Document, str](dr)) { ret 1; }
+    val d: doc.Document = unwrap_ok[doc.Document, str](dr);
+
+    # destroy the source. every byte, not just the terminators.
+    var i: usize = 0;
+    for (i < 1024) {
+        jbuf[i] = 0xAA;
+        i = i + 1;
+    }
+
+    if (!str_equals(d.asset.version, "2.0")) { ret 1; }
+    if (!str_equals(d.asset.generator, "mach-gltf-test")) { ret 1; }
+    # an absent member is an owned empty string, never nil, so this is safe to
+    # compare rather than needing a nil guard first
+    if (!str_equals(d.asset.copyright, "")) { ret 1; }
     ret 0;
 }
