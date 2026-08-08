@@ -2,14 +2,25 @@
 #
 # typed records mirroring the glTF top-level arrays and their cross-references.
 # indices between arrays are stored as i64 with NONE marking an absent optional
-# reference; names and other strings are borrowed StrViews into the source JSON,
-# so the caller must keep that buffer alive while the document is in use. this
-# module is pure data plus the small numeric helpers that describe accessor
+# reference.
+#
+# OWNERSHIP. every string and every array in a Document is allocated from the
+# allocator passed to `gltf.parse.parse_document`, and nothing points into the
+# source JSON. a caller may therefore free or reuse the JSON bytes the moment
+# parsing returns. the lifetime discipline is the allocator's: an arena freed
+# wholesale, matching std.data.json's own Value tree, so there is no per-field
+# teardown to call and no order to get wrong.
+#
+# strings are plain null-terminated `str`, so any std string function applies
+# directly. an absent or empty member is an owned empty string rather than nil,
+# so a consumer never nil-checks before comparing or formatting.
+#
+# this module is data plus the small numeric helpers that describe accessor
 # element layout; the JSON bridge lives in gltf.parse.
 
 use std.types.bool.bool;
 use std.types.size.usize;
-use std.types.string.StrView;
+use std.types.string.str;
 use slice: std.collections.slice;
 
 # sentinel for an absent optional index (glTF indices are non-negative)
@@ -100,10 +111,10 @@ pub fun component_size(c: ComponentType) usize {
 # generator:   tool that produced the asset, empty when absent
 # copyright:   copyright notice, empty when absent
 pub rec Asset {
-    version:     StrView;
-    min_version: StrView;
-    generator:   StrView;
-    copyright:   StrView;
+    version:     str;
+    min_version: str;
+    generator:   str;
+    copyright:   str;
 }
 
 # a block of binary data referenced by buffer views
@@ -113,8 +124,8 @@ pub rec Asset {
 # name:        user-defined name, empty when absent
 pub rec Buffer {
     byte_length: usize;
-    uri:         StrView;
-    name:        StrView;
+    uri:         str;
+    name:        str;
 }
 
 # a typed window into a buffer
@@ -131,7 +142,7 @@ pub rec BufferView {
     byte_length: usize;
     byte_stride: usize;
     target:      i64;
-    name:        StrView;
+    name:        str;
 }
 
 # a typed view over a buffer view's bytes as element data
@@ -160,7 +171,7 @@ pub rec Accessor {
     bounds_len:     usize;
     has_min:        bool;
     has_max:        bool;
-    name:           StrView;
+    name:           str;
 }
 
 # byte size of one accessor element (component_count * component_size)
@@ -182,7 +193,7 @@ pub fun scalar_count(a: *Accessor) usize {
 # name:     attribute semantic (e.g. "POSITION", "NORMAL", "TEXCOORD_0")
 # accessor: index of the accessor supplying the attribute's data
 pub rec Attribute {
-    name:     StrView;
+    name:     str;
     accessor: i64;
 }
 
@@ -216,7 +227,7 @@ pub rec Primitive {
 pub rec Mesh {
     primitives: slice.Slice[Primitive];
     weights:    slice.Slice[f32];
-    name:       StrView;
+    name:       str;
 }
 
 # a scene-graph node with a local transform and optional attachments
@@ -243,7 +254,7 @@ pub rec Node {
     rotation:    [4]f32;
     scale:       [3]f32;
     weights:     slice.Slice[f32];
-    name:        StrView;
+    name:        str;
 }
 
 # a set of root nodes to instantiate together
@@ -252,7 +263,7 @@ pub rec Node {
 # name:  user-defined name, empty when absent
 pub rec Scene {
     nodes: slice.Slice[i64];
-    name:  StrView;
+    name:  str;
 }
 
 # a material's reference to a texture and its UV set
@@ -303,7 +314,7 @@ pub rec Material {
     alpha_mode:         AlphaMode;
     alpha_cutoff:       f32;
     double_sided:       bool;
-    name:               StrView;
+    name:               str;
 }
 
 # a sampled image, pairing an image source with a sampler
@@ -314,7 +325,7 @@ pub rec Material {
 pub rec Texture {
     source:  i64;
     sampler: i64;
-    name:    StrView;
+    name:    str;
 }
 
 # image data referenced by a texture
@@ -324,10 +335,10 @@ pub rec Texture {
 # buffer_view: buffer view index supplying the bytes, or NONE
 # name:        user-defined name, empty when absent
 pub rec Image {
-    uri:         StrView;
-    mime_type:   StrView;
+    uri:         str;
+    mime_type:   str;
     buffer_view: i64;
-    name:        StrView;
+    name:        str;
 }
 
 # texture filtering and wrapping parameters
@@ -342,7 +353,7 @@ pub rec Sampler {
     min_filter: i64;
     wrap_s:     i64;
     wrap_t:     i64;
-    name:       StrView;
+    name:       str;
 }
 
 # joint hierarchy and bind data for skeletal animation
@@ -355,7 +366,7 @@ pub rec Skin {
     inverse_bind_matrices: i64;
     skeleton:              i64;
     joints:                slice.Slice[i64];
-    name:                  StrView;
+    name:                  str;
 }
 
 # a keyframe interpolation source for an animation
@@ -388,7 +399,7 @@ pub rec AnimationChannel {
 pub rec Animation {
     samplers: slice.Slice[AnimationSampler];
     channels: slice.Slice[AnimationChannel];
-    name:     StrView;
+    name:     str;
 }
 
 # the parsed glTF asset, holding every top-level array
