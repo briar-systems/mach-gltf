@@ -15,9 +15,9 @@ pub fun read_u16(p: *u8, off: usize) u16 {
 # read a little-endian u32 at byte offset off
 pub fun read_u32(p: *u8, off: usize) u32 {
     ret (p[off]::u32)
-      | (p[off + 1]::u32 << 8)
-      | (p[off + 2]::u32 << 16)
-      | (p[off + 3]::u32 << 24);
+        | (p[off + 1]::u32 << 8)
+        | (p[off + 2]::u32 << 16)
+        | (p[off + 3]::u32 << 24);
 }
 
 # read a little-endian signed 16-bit integer at byte offset off
@@ -64,7 +64,7 @@ test "bytes: read_u32 assembles little-endian order" {
 test "bytes: read_f32 reinterprets the exact bit pattern" {
     # 1.0f32 is 0x3F800000 little-endian.
     var b: [4]u8 = [4]u8{0x00, 0x00, 0x80, 0x3F};
-    val f: f32 = read_f32(?b[0], 0);
+    val f: f32   = read_f32(?b[0], 0);
     if (f != 1.0f32) { ret 1; }
     ret 0;
 }

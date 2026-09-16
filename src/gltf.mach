@@ -4,10 +4,10 @@
 # bare `use gltf;` reaches the whole API as gltf.MAGIC, gltf.Header, and so on.
 # `[project].module = "gltf.mach"` makes that bare import resolve here.
 
-use gltf.glb;
-use gltf.doc;
-use gltf.parse;
 use gltf.accessor;
+use gltf.doc;
+use gltf.glb;
+use gltf.parse;
 # links the startup entrypoint so `mach test` over this library produces a binary.
 use std.runtime;
 

@@ -14,25 +14,25 @@
 # top-level element it was read under. an optional member that is absent takes
 # its specification default or reads `none`.
 
+use gltf.accessor;
+use gltf.bytes;
+use gltf.doc;
+use gltf.glb;
+use allo: std.allocator;
+use std.allocator.page;
+use std.collections.slice;
+use std.data.json;
+use text: std.text.string;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
 use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
-use std.types.string.str_starts_with;
 use std.types.string.str_len;
-use text:     std.text.string;
-use json:     std.data.json;
-use allo:     std.allocator;
-use slice:    std.collections.slice;
-use doc:      gltf.doc;
-use glb:      gltf.glb;
-use bytes:    gltf.bytes;
-use accessor: gltf.accessor;
-use page:     std.allocator.page;
+use std.types.string.str_starts_with;
 
 # where in a document a defect was found
 #
@@ -80,8 +80,8 @@ pub tag Site: u8 {
 # missing: a member the specification requires is absent
 # invalid: a member has the wrong JSON type or a value outside its domain
 pub tag DocumentError: u8 {
-    json:    json.JsonError;
-    alloc:   allo.Error;
+    json:  json.JsonError;
+    alloc: allo.Error;
     version;
     missing: Site;
     invalid: Site;
@@ -244,7 +244,7 @@ fun get_floats(c: *Cursor, obj: *json.Value, key: str, out: *f32, n: usize) bool
         val e: opt[*json.Value] = json.value_get(arr, i);
         if (sel e.none) { brk; }
         out[i] = number(c, e.some);
-        i = i + 1;
+        i      = i + 1;
     }
     ret true;
 }
@@ -278,14 +278,14 @@ fun decode(c: *Cursor, v: *json.Value) str {
         invalid(c);
         ret "";
     }
-    val n: usize = sized.ok;
+    val n:  usize                = sized.ok;
     val ar: res[*u8, allo.Error] = allo.allocate[u8](c.alloc, n + 1);
     if (sel ar.err) {
         fail(c, DocumentError.alloc{ar.err});
         ret "";
     }
-    val buf: *u8 = ar.ok;
-    val dr: res[usize, json.JsonError] = json.value_string_decode(v, buf, n);
+    val buf: *u8                        = ar.ok;
+    val dr:  res[usize, json.JsonError] = json.value_string_decode(v, buf, n);
     if (sel dr.err) {
         invalid(c);
         ret "";
@@ -357,13 +357,13 @@ fun elements[T](c: *Cursor, arr: *json.Value, parse: fun(*Cursor, *json.Value) T
         fail(c, DocumentError.alloc{ar.err});
         ret slice.make[T](nil, 0);
     }
-    val data: *T = ar.ok;
-    var i: usize = 0;
+    val data: *T    = ar.ok;
+    var i:    usize = 0;
     for (i < n) {
         val e: opt[*json.Value] = json.value_get(arr, i);
         if (sel e.none) { brk; }
         data[i] = parse(c, e.some);
-        i = i + 1;
+        i       = i + 1;
     }
     ret slice.make[T](data, i);
 }
@@ -501,8 +501,8 @@ fun parse_buffer(c: *Cursor, e: *json.Value) doc.Buffer {
         ret b;
     }
     b.byte_length = need_usize(c, e, "byteLength");
-    b.uri = get_str(c, e, "uri");
-    b.name = get_str(c, e, "name");
+    b.uri         = get_str(c, e, "uri");
+    b.name        = get_str(c, e, "name");
     ret b;
 }
 
@@ -512,7 +512,7 @@ fun parse_buffer_view(c: *Cursor, e: *json.Value) doc.BufferView {
         invalid(c);
         ret v;
     }
-    v.buffer = need_usize(c, e, "buffer");
+    v.buffer      = need_usize(c, e, "buffer");
     v.byte_offset = get_usize(c, e, "byteOffset", 0);
     v.byte_length = need_usize(c, e, "byteLength");
     v.byte_stride = get_usize(c, e, "byteStride", 0);
@@ -528,17 +528,18 @@ fun parse_accessor(c: *Cursor, e: *json.Value) doc.Accessor {
         invalid(c);
         ret a;
     }
-    a.buffer_view = opt_usize(c, e, "bufferView");
-    a.byte_offset = get_usize(c, e, "byteOffset", 0);
+    a.buffer_view    = opt_usize(c, e, "bufferView");
+    a.byte_offset    = get_usize(c, e, "byteOffset", 0);
     a.component_type = component_type(c, need_usize(c, e, "componentType"));
-    a.normalized = get_bool(c, e, "normalized", false);
-    a.count = need_usize(c, e, "count");
-    a.name = get_str(c, e, "name");
+    a.normalized     = get_bool(c, e, "normalized", false);
+    a.count          = need_usize(c, e, "count");
+    a.name           = get_str(c, e, "name");
 
     var word: [16]u8;
     if (get_word(c, e, "type", ?word[0])) {
         a.element_type = accessor_type(c, ?word[0]);
-    } or {
+    }
+    or {
         missing(c);
     }
 
@@ -582,10 +583,10 @@ fun parse_attributes(c: *Cursor, obj: *json.Value) slice.Slice[doc.Attribute] {
             fail(c, DocumentError.alloc{nr.err});
             brk;
         }
-        at.name = nr.ok;
+        at.name     = nr.ok;
         at.accessor = integer(c, v.some);
-        data[i] = at;
-        i = i + 1;
+        data[i]     = at;
+        i           = i + 1;
     }
     ret slice.make[doc.Attribute](data, i);
 }
@@ -605,13 +606,14 @@ fun parse_primitive(c: *Cursor, e: *json.Value) doc.Primitive {
     val attrs: opt[*json.Value] = json.value_find(e, "attributes");
     if (sel attrs.some) {
         p.attributes = parse_attributes(c, attrs.some);
-    } or {
+    }
+    or {
         missing(c);
     }
-    p.targets = get_list[doc.MorphTarget](c, e, "targets", parse_morph_target);
-    p.indices = opt_usize(c, e, "indices");
+    p.targets  = get_list[doc.MorphTarget](c, e, "targets", parse_morph_target);
+    p.indices  = opt_usize(c, e, "indices");
     p.material = opt_usize(c, e, "material");
-    p.mode = primitive_mode(c, get_usize(c, e, "mode", 4));
+    p.mode     = primitive_mode(c, get_usize(c, e, "mode", 4));
     ret p;
 }
 
@@ -622,8 +624,8 @@ fun parse_mesh(c: *Cursor, e: *json.Value) doc.Mesh {
         ret m;
     }
     m.primitives = need_list[doc.Primitive](c, e, "primitives", parse_primitive);
-    m.weights = get_list[f32](c, e, "weights", float_element);
-    m.name = get_str(c, e, "name");
+    m.weights    = get_list[f32](c, e, "weights", float_element);
+    m.name       = get_str(c, e, "name");
     ret m;
 }
 
@@ -634,20 +636,27 @@ fun parse_node(c: *Cursor, e: *json.Value) doc.Node {
         ret nd;
     }
     nd.children = get_list[usize](c, e, "children", index_element);
-    nd.mesh = opt_usize(c, e, "mesh");
-    nd.skin = opt_usize(c, e, "skin");
-    nd.camera = opt_usize(c, e, "camera");
+    nd.mesh     = opt_usize(c, e, "mesh");
+    nd.skin     = opt_usize(c, e, "skin");
+    nd.camera   = opt_usize(c, e, "camera");
 
-    nd.translation[0] = 0.0f32; nd.translation[1] = 0.0f32; nd.translation[2] = 0.0f32;
-    nd.rotation[0] = 0.0f32; nd.rotation[1] = 0.0f32; nd.rotation[2] = 0.0f32; nd.rotation[3] = 1.0f32;
-    nd.scale[0] = 1.0f32; nd.scale[1] = 1.0f32; nd.scale[2] = 1.0f32;
-    nd.has_matrix = get_floats(c, e, "matrix", ?nd.matrix[0], 16);
+    nd.translation[0] = 0.0f32;
+    nd.translation[1] = 0.0f32;
+    nd.translation[2] = 0.0f32;
+    nd.rotation[0]    = 0.0f32;
+    nd.rotation[1]    = 0.0f32;
+    nd.rotation[2]    = 0.0f32;
+    nd.rotation[3]    = 1.0f32;
+    nd.scale[0]       = 1.0f32;
+    nd.scale[1]       = 1.0f32;
+    nd.scale[2]       = 1.0f32;
+    nd.has_matrix     = get_floats(c, e, "matrix", ?nd.matrix[0], 16);
     get_floats(c, e, "translation", ?nd.translation[0], 3);
     get_floats(c, e, "rotation", ?nd.rotation[0], 4);
     get_floats(c, e, "scale", ?nd.scale[0], 3);
 
     nd.weights = get_list[f32](c, e, "weights", float_element);
-    nd.name = get_str(c, e, "name");
+    nd.name    = get_str(c, e, "name");
     ret nd;
 }
 
@@ -658,7 +667,7 @@ fun parse_scene(c: *Cursor, e: *json.Value) doc.Scene {
         ret s;
     }
     s.nodes = get_list[usize](c, e, "nodes", index_element);
-    s.name = get_str(c, e, "name");
+    s.name  = get_str(c, e, "name");
     ret s;
 }
 
@@ -667,24 +676,26 @@ fun texture_ref(c: *Cursor, obj: *json.Value, key: str) opt[doc.TextureRef] {
     val m: opt[*json.Value] = get_object(c, obj, key);
     if (sel m.none) { ret opt[doc.TextureRef].none{}; }
     var t: doc.TextureRef;
-    t.index = need_usize(c, m.some, "index");
+    t.index     = need_usize(c, m.some, "index");
     t.tex_coord = get_usize(c, m.some, "texCoord", 0);
     ret opt[doc.TextureRef].some{t};
 }
 
 fun parse_pbr(c: *Cursor, mat: *json.Value) doc.PbrMetallicRoughness {
     var p: doc.PbrMetallicRoughness;
-    p.base_color_factor[0] = 1.0f32; p.base_color_factor[1] = 1.0f32;
-    p.base_color_factor[2] = 1.0f32; p.base_color_factor[3] = 1.0f32;
-    p.metallic_factor = 1.0f32;
-    p.roughness_factor = 1.0f32;
+    p.base_color_factor[0] = 1.0f32;
+    p.base_color_factor[1] = 1.0f32;
+    p.base_color_factor[2] = 1.0f32;
+    p.base_color_factor[3] = 1.0f32;
+    p.metallic_factor      = 1.0f32;
+    p.roughness_factor     = 1.0f32;
 
     val m: opt[*json.Value] = get_object(c, mat, "pbrMetallicRoughness");
     if (sel m.none) { ret p; }
     get_floats(c, m.some, "baseColorFactor", ?p.base_color_factor[0], 4);
-    p.metallic_factor = get_f32(c, m.some, "metallicFactor", 1.0f32);
-    p.roughness_factor = get_f32(c, m.some, "roughnessFactor", 1.0f32);
-    p.base_color_texture = texture_ref(c, m.some, "baseColorTexture");
+    p.metallic_factor            = get_f32(c, m.some, "metallicFactor", 1.0f32);
+    p.roughness_factor           = get_f32(c, m.some, "roughnessFactor", 1.0f32);
+    p.base_color_texture         = texture_ref(c, m.some, "baseColorTexture");
     p.metallic_roughness_texture = texture_ref(c, m.some, "metallicRoughnessTexture");
     ret p;
 }
@@ -695,10 +706,10 @@ fun parse_material(c: *Cursor, e: *json.Value) doc.Material {
         invalid(c);
         ret mt;
     }
-    mt.pbr = parse_pbr(c, e);
-    mt.normal_texture = texture_ref(c, e, "normalTexture");
+    mt.pbr               = parse_pbr(c, e);
+    mt.normal_texture    = texture_ref(c, e, "normalTexture");
     mt.occlusion_texture = texture_ref(c, e, "occlusionTexture");
-    mt.emissive_texture = texture_ref(c, e, "emissiveTexture");
+    mt.emissive_texture  = texture_ref(c, e, "emissiveTexture");
 
     mt.normal_scale = 1.0f32;
     val nt: opt[*json.Value] = get_object(c, e, "normalTexture");
@@ -707,7 +718,9 @@ fun parse_material(c: *Cursor, e: *json.Value) doc.Material {
     val ot: opt[*json.Value] = get_object(c, e, "occlusionTexture");
     if (sel ot.some) { mt.occlusion_strength = get_f32(c, ot.some, "strength", 1.0f32); }
 
-    mt.emissive_factor[0] = 0.0f32; mt.emissive_factor[1] = 0.0f32; mt.emissive_factor[2] = 0.0f32;
+    mt.emissive_factor[0] = 0.0f32;
+    mt.emissive_factor[1] = 0.0f32;
+    mt.emissive_factor[2] = 0.0f32;
     get_floats(c, e, "emissiveFactor", ?mt.emissive_factor[0], 3);
 
     var word: [16]u8;
@@ -715,7 +728,7 @@ fun parse_material(c: *Cursor, e: *json.Value) doc.Material {
     if (get_word(c, e, "alphaMode", ?word[0])) { mt.alpha_mode = alpha_mode(c, ?word[0]); }
     mt.alpha_cutoff = get_f32(c, e, "alphaCutoff", 0.5f32);
     mt.double_sided = get_bool(c, e, "doubleSided", false);
-    mt.name = get_str(c, e, "name");
+    mt.name         = get_str(c, e, "name");
     ret mt;
 }
 
@@ -725,9 +738,9 @@ fun parse_texture(c: *Cursor, e: *json.Value) doc.Texture {
         invalid(c);
         ret t;
     }
-    t.source = opt_usize(c, e, "source");
+    t.source  = opt_usize(c, e, "source");
     t.sampler = opt_usize(c, e, "sampler");
-    t.name = get_str(c, e, "name");
+    t.name    = get_str(c, e, "name");
     ret t;
 }
 
@@ -737,10 +750,10 @@ fun parse_image(c: *Cursor, e: *json.Value) doc.Image {
         invalid(c);
         ret im;
     }
-    im.uri = get_str(c, e, "uri");
-    im.mime_type = get_str(c, e, "mimeType");
+    im.uri         = get_str(c, e, "uri");
+    im.mime_type   = get_str(c, e, "mimeType");
     im.buffer_view = opt_usize(c, e, "bufferView");
-    im.name = get_str(c, e, "name");
+    im.name        = get_str(c, e, "name");
     ret im;
 }
 
@@ -756,7 +769,7 @@ fun parse_sampler(c: *Cursor, e: *json.Value) doc.Sampler {
     if (sel min.some) { sm.min_filter = opt[doc.MinFilter].some{min_filter(c, min.some)}; }
     sm.wrap_s = wrap_mode(c, get_usize(c, e, "wrapS", 10497));
     sm.wrap_t = wrap_mode(c, get_usize(c, e, "wrapT", 10497));
-    sm.name = get_str(c, e, "name");
+    sm.name   = get_str(c, e, "name");
     ret sm;
 }
 
@@ -767,9 +780,9 @@ fun parse_skin(c: *Cursor, e: *json.Value) doc.Skin {
         ret sk;
     }
     sk.inverse_bind_matrices = opt_usize(c, e, "inverseBindMatrices");
-    sk.skeleton = opt_usize(c, e, "skeleton");
-    sk.joints = need_list[usize](c, e, "joints", index_element);
-    sk.name = get_str(c, e, "name");
+    sk.skeleton              = opt_usize(c, e, "skeleton");
+    sk.joints                = need_list[usize](c, e, "joints", index_element);
+    sk.name                  = get_str(c, e, "name");
     ret sk;
 }
 
@@ -779,7 +792,7 @@ fun parse_anim_sampler(c: *Cursor, e: *json.Value) doc.AnimationSampler {
         invalid(c);
         ret s;
     }
-    s.input = need_usize(c, e, "input");
+    s.input  = need_usize(c, e, "input");
     s.output = need_usize(c, e, "output");
     var word: [16]u8;
     s.interpolation = doc.Interpolation.linear{};
@@ -800,7 +813,8 @@ fun parse_anim_channel(c: *Cursor, e: *json.Value) doc.AnimationChannel {
     var word: [16]u8;
     if (get_word(c, tgt.some, "path", ?word[0])) {
         ch.target_path = target_path(c, ?word[0]);
-    } or {
+    }
+    or {
         missing(c);
     }
     ret ch;
@@ -814,22 +828,57 @@ fun parse_animation(c: *Cursor, e: *json.Value) doc.Animation {
     }
     an.channels = need_list[doc.AnimationChannel](c, e, "channels", parse_anim_channel);
     an.samplers = need_list[doc.AnimationSampler](c, e, "samplers", parse_anim_sampler);
-    an.name = get_str(c, e, "name");
+    an.name     = get_str(c, e, "name");
     ret an;
 }
 
-fun at_buffer(i: usize) Site { ret Site.buffer{i}; }
-fun at_buffer_view(i: usize) Site { ret Site.buffer_view{i}; }
-fun at_accessor(i: usize) Site { ret Site.accessor{i}; }
-fun at_mesh(i: usize) Site { ret Site.mesh{i}; }
-fun at_node(i: usize) Site { ret Site.node{i}; }
-fun at_scene(i: usize) Site { ret Site.scene{i}; }
-fun at_material(i: usize) Site { ret Site.material{i}; }
-fun at_texture(i: usize) Site { ret Site.texture{i}; }
-fun at_image(i: usize) Site { ret Site.image{i}; }
-fun at_sampler(i: usize) Site { ret Site.sampler{i}; }
-fun at_skin(i: usize) Site { ret Site.skin{i}; }
-fun at_animation(i: usize) Site { ret Site.animation{i}; }
+fun at_buffer(i: usize) Site {
+    ret Site.buffer{i};
+}
+
+fun at_buffer_view(i: usize) Site {
+    ret Site.buffer_view{i};
+}
+
+fun at_accessor(i: usize) Site {
+    ret Site.accessor{i};
+}
+
+fun at_mesh(i: usize) Site {
+    ret Site.mesh{i};
+}
+
+fun at_node(i: usize) Site {
+    ret Site.node{i};
+}
+
+fun at_scene(i: usize) Site {
+    ret Site.scene{i};
+}
+
+fun at_material(i: usize) Site {
+    ret Site.material{i};
+}
+
+fun at_texture(i: usize) Site {
+    ret Site.texture{i};
+}
+
+fun at_image(i: usize) Site {
+    ret Site.image{i};
+}
+
+fun at_sampler(i: usize) Site {
+    ret Site.sampler{i};
+}
+
+fun at_skin(i: usize) Site {
+    ret Site.skin{i};
+}
+
+fun at_animation(i: usize) Site {
+    ret Site.animation{i};
+}
 
 # read a top-level collection, each element under its own site
 # ---
@@ -857,11 +906,11 @@ fun section[T](root: *json.Value, key: str, alloc: *allo.Allocator, site: fun(us
         if (sel e.none) { brk; }
         var c: Cursor;
         c.alloc = alloc;
-        c.site = site(i);
+        c.site  = site(i);
         val v: T = parse(?c, e.some);
         if (sel c.fault.some) { ret res[slice.Slice[T], DocumentError].err{c.fault.some}; }
         data[i] = v;
-        i = i + 1;
+        i       = i + 1;
     }
     ret res[slice.Slice[T], DocumentError].ok{slice.make[T](data, i)};
 }
@@ -875,15 +924,15 @@ fun major_two(v: str) bool {
 fun parse_asset(root: *json.Value, alloc: *allo.Allocator) res[doc.Asset, DocumentError] {
     var c: Cursor;
     c.alloc = alloc;
-    c.site = Site.asset{};
+    c.site  = Site.asset{};
 
     var a: doc.Asset;
     val m: opt[*json.Value] = need_object(?c, root, "asset");
     if (sel m.some) {
-        a.version = need_str(?c, m.some, "version");
+        a.version     = need_str(?c, m.some, "version");
         a.min_version = get_str(?c, m.some, "minVersion");
-        a.generator = get_str(?c, m.some, "generator");
-        a.copyright = get_str(?c, m.some, "copyright");
+        a.generator   = get_str(?c, m.some, "generator");
+        a.copyright   = get_str(?c, m.some, "copyright");
     }
     if (sel c.fault.some) { ret res[doc.Asset, DocumentError].err{c.fault.some}; }
 
@@ -910,15 +959,15 @@ pub fun parse_document(json_bytes: *u8, len: usize, alloc: *allo.Allocator) res[
     var root: json.Value = jr.ok;
     if (!json.value_is_object(?root)) { ret res[doc.Document, DocumentError].err{DocumentError.invalid{Site.root{}}}; }
 
-    var d: doc.Document;
+    var d:   doc.Document;
     val asr: res[doc.Asset, DocumentError] = parse_asset(?root, alloc);
     if (sel asr.err) { ret res[doc.Document, DocumentError].err{asr.err}; }
     d.asset = asr.ok;
 
     var rc: Cursor;
     rc.alloc = alloc;
-    rc.site = Site.root{};
-    d.scene = opt_usize(?rc, ?root, "scene");
+    rc.site  = Site.root{};
+    d.scene  = opt_usize(?rc, ?root, "scene");
     if (sel rc.fault.some) { ret res[doc.Document, DocumentError].err{rc.fault.some}; }
 
     val buffers: res[slice.Slice[doc.Buffer], DocumentError] = section[doc.Buffer](?root, "buffers", alloc, at_buffer, parse_buffer);
@@ -988,8 +1037,8 @@ pub fun load_glb(data: *u8, len: usize, alloc: *allo.Allocator) res[Loaded, Load
 
     var out: Loaded;
     out.document = dr.ok;
-    out.bin = g.bin;
-    out.bin_len = g.bin_len;
+    out.bin      = g.bin;
+    out.bin_len  = g.bin_len;
     ret res[Loaded, LoadError].ok{out};
 }
 
@@ -1004,7 +1053,7 @@ fun append_cstr(out: *u8, off: usize, s: str) usize {
     var i: usize = 0;
     for (s[i] != 0) {
         out[off + i] = s[i];
-        i = i + 1;
+        i            = i + 1;
     }
     ret off + i;
 }
@@ -1014,11 +1063,11 @@ fun append_cstr(out: *u8, off: usize, s: str) usize {
 # the JSON chunk is space-padded and the BIN chunk zero-padded to 4-byte
 # alignment, matching the container specification.
 fun assemble_glb(out: *u8, json: *u8, json_len: usize, bin: *u8, bin_len: usize) usize {
-    val jpad: usize = (4 - (json_len % 4)) % 4;
+    val jpad:   usize = (4 - (json_len % 4)) % 4;
     val jchunk: usize = json_len + jpad;
-    val bpad: usize = (4 - (bin_len % 4)) % 4;
+    val bpad:   usize = (4 - (bin_len % 4)) % 4;
     val bchunk: usize = bin_len + bpad;
-    val total: usize = 12 + 8 + jchunk + 8 + bchunk;
+    val total:  usize = 12 + 8 + jchunk + 8 + bchunk;
 
     bytes.write_u32(out, 0, glb.MAGIC);
     bytes.write_u32(out, 4, glb.VERSION);
@@ -1027,17 +1076,29 @@ fun assemble_glb(out: *u8, json: *u8, json_len: usize, bin: *u8, bin_len: usize)
     bytes.write_u32(out, 12, jchunk::u32);
     bytes.write_u32(out, 16, glb.CHUNK_JSON);
     var i: usize = 0;
-    for (i < json_len) { out[20 + i] = json[i]; i = i + 1; }
+    for (i < json_len) {
+        out[20 + i] = json[i];
+        i           = i + 1;
+    }
     var p: usize = 0;
-    for (p < jpad) { out[20 + json_len + p] = ' '; p = p + 1; }
+    for (p < jpad) {
+        out[20 + json_len + p] = ' ';
+        p                      = p + 1;
+    }
 
     val boff: usize = 20 + jchunk;
     bytes.write_u32(out, boff, bchunk::u32);
     bytes.write_u32(out, boff + 4, glb.CHUNK_BIN);
     i = 0;
-    for (i < bin_len) { out[boff + 8 + i] = bin[i]; i = i + 1; }
+    for (i < bin_len) {
+        out[boff + 8 + i] = bin[i];
+        i                 = i + 1;
+    }
     p = 0;
-    for (p < bpad) { out[boff + 8 + bin_len + p] = 0; p = p + 1; }
+    for (p < bpad) {
+        out[boff + 8 + bin_len + p] = 0;
+        p                           = p + 1;
+    }
     ret total;
 }
 
@@ -1085,58 +1146,58 @@ test "parse: document structure from a synthetic .glb, including float fields" {
     var binsrc: [42]u8;
     fixture_bin(?binsrc[0]);
     var jbuf: [1024]u8;
-    val jl: usize = fixture_json(?jbuf[0]);
-    var buf: [2048]u8;
-    val n: usize = assemble_glb(?buf[0], ?jbuf[0], jl, ?binsrc[0], 42);
+    val jl:   usize = fixture_json(?jbuf[0]);
+    var buf:  [2048]u8;
+    val n:    usize = assemble_glb(?buf[0], ?jbuf[0], jl, ?binsrc[0], 42);
 
     val lr: res[Loaded, LoadError] = load_glb(?buf[0], n, ?a);
     if (sel lr.err) { ret 1; }
-    val ld: Loaded = lr.ok;
-    val d: doc.Document = ld.document;
+    val ld: Loaded       = lr.ok;
+    val d:  doc.Document = ld.document;
 
-    if (!str_equals(d.asset.version, "2.0")) { ret 1; }
-    if (!is_index(d.scene, 0)) { ret 1; }
-    if (d.scenes.size != 1 || d.nodes.size != 2) { ret 1; }
+    if (!str_equals(d.asset.version, "2.0"))                                     { ret 1; }
+    if (!is_index(d.scene, 0))                                                   { ret 1; }
+    if (d.scenes.size != 1 || d.nodes.size != 2)                                 { ret 1; }
     if (d.scenes.data[0].nodes.size != 1 || d.scenes.data[0].nodes.data[0] != 0) { ret 1; }
 
     val n0: *doc.Node = ?d.nodes.data[0];
-    if (!is_index(n0.mesh, 0)) { ret 1; }
-    if (n0.children.size != 1 || n0.children.data[0] != 1) { ret 1; }
-    if (n0.has_matrix) { ret 1; }
+    if (!is_index(n0.mesh, 0))                                                                       { ret 1; }
+    if (n0.children.size != 1 || n0.children.data[0] != 1)                                           { ret 1; }
+    if (n0.has_matrix)                                                                               { ret 1; }
     if (n0.translation[0] != 1.5f32 || n0.translation[1] != -2.0f32 || n0.translation[2] != 3.25f32) { ret 1; }
-    if (n0.scale[0] != 2.0f32 || n0.scale[1] != 2.0f32 || n0.scale[2] != 2.0f32) { ret 1; }
-    if (n0.rotation[3] != 1.0f32) { ret 1; }
-    if (d.nodes.data[1].rotation[3] != 1.0f32) { ret 1; }
+    if (n0.scale[0] != 2.0f32 || n0.scale[1] != 2.0f32 || n0.scale[2] != 2.0f32)                     { ret 1; }
+    if (n0.rotation[3] != 1.0f32)                                                                    { ret 1; }
+    if (d.nodes.data[1].rotation[3] != 1.0f32)                                                       { ret 1; }
 
     if (d.meshes.size != 1) { ret 1; }
     val prim: *doc.Primitive = ?d.meshes.data[0].primitives.data[0];
-    if (prim.attributes.size != 1) { ret 1; }
-    if (!str_equals(prim.attributes.data[0].name, "POSITION")) { ret 1; }
-    if (prim.attributes.data[0].accessor != 0) { ret 1; }
+    if (prim.attributes.size != 1)                                 { ret 1; }
+    if (!str_equals(prim.attributes.data[0].name, "POSITION"))     { ret 1; }
+    if (prim.attributes.data[0].accessor != 0)                     { ret 1; }
     if (!is_index(prim.indices, 1) || !is_index(prim.material, 0)) { ret 1; }
-    if (!sel prim.mode.triangles) { ret 1; }
+    if (!sel prim.mode.triangles)                                  { ret 1; }
 
     if (d.accessors.size != 2) { ret 1; }
     val ac0: *doc.Accessor = ?d.accessors.data[0];
-    if (!sel ac0.component_type.float || ac0.count != 3) { ret 1; }
-    if (!sel ac0.element_type.vec3) { ret 1; }
-    if (!ac0.has_min || !ac0.has_max || ac0.bounds_len != 3) { ret 1; }
-    if (ac0.min[0] != 1.0f32 || ac0.min[2] != 3.0f32) { ret 1; }
-    if (ac0.max[0] != 7.0f32 || ac0.max[2] != 9.0f32) { ret 1; }
+    if (!sel ac0.component_type.float || ac0.count != 3)        { ret 1; }
+    if (!sel ac0.element_type.vec3)                             { ret 1; }
+    if (!ac0.has_min || !ac0.has_max || ac0.bounds_len != 3)    { ret 1; }
+    if (ac0.min[0] != 1.0f32 || ac0.min[2] != 3.0f32)           { ret 1; }
+    if (ac0.max[0] != 7.0f32 || ac0.max[2] != 9.0f32)           { ret 1; }
     if (!sel d.accessors.data[1].component_type.unsigned_short) { ret 1; }
 
-    if (d.buffer_views.size != 2) { ret 1; }
-    if (d.buffer_views.data[0].byte_length != 36) { ret 1; }
-    if (d.buffer_views.data[1].byte_offset != 36) { ret 1; }
+    if (d.buffer_views.size != 2)                                   { ret 1; }
+    if (d.buffer_views.data[0].byte_length != 36)                   { ret 1; }
+    if (d.buffer_views.data[1].byte_offset != 36)                   { ret 1; }
     if (d.buffers.size != 1 || d.buffers.data[0].byte_length != 42) { ret 1; }
 
     if (d.materials.size != 1) { ret 1; }
     val mt: *doc.Material = ?d.materials.data[0];
     if (mt.pbr.base_color_factor[1] != 0.5f32 || mt.pbr.base_color_factor[2] != 0.25f32) { ret 1; }
-    if (mt.pbr.metallic_factor != 0.0f32 || mt.pbr.roughness_factor != 0.5f32) { ret 1; }
-    if (mt.emissive_factor[0] != 0.5f32 || mt.emissive_factor[2] != 0.125f32) { ret 1; }
-    if (!sel mt.alpha_mode.mask || mt.alpha_cutoff != 0.25f32) { ret 1; }
-    if (!mt.double_sided) { ret 1; }
+    if (mt.pbr.metallic_factor != 0.0f32 || mt.pbr.roughness_factor != 0.5f32)           { ret 1; }
+    if (mt.emissive_factor[0] != 0.5f32 || mt.emissive_factor[2] != 0.125f32)            { ret 1; }
+    if (!sel mt.alpha_mode.mask || mt.alpha_cutoff != 0.25f32)                           { ret 1; }
+    if (!mt.double_sided)                                                                { ret 1; }
     ret 0;
 }
 
@@ -1147,9 +1208,9 @@ test "parse: accessor reads over the BIN chunk return exact values" {
     var binsrc: [42]u8;
     fixture_bin(?binsrc[0]);
     var jbuf: [1024]u8;
-    val jl: usize = fixture_json(?jbuf[0]);
-    var buf: [2048]u8;
-    val n: usize = assemble_glb(?buf[0], ?jbuf[0], jl, ?binsrc[0], 42);
+    val jl:   usize = fixture_json(?jbuf[0]);
+    var buf:  [2048]u8;
+    val n:    usize = assemble_glb(?buf[0], ?jbuf[0], jl, ?binsrc[0], 42);
 
     val lr: res[Loaded, LoadError] = load_glb(?buf[0], n, ?a);
     if (sel lr.err) { ret 1; }
@@ -1160,7 +1221,7 @@ test "parse: accessor reads over the BIN chunk return exact values" {
     var pos_plan: accessor.Plan = pr.ok;
 
     var pos: [9]f32;
-    val fr: res[usize, accessor.ReadError] = accessor.read_f32(?pos_plan, ?pos[0], 9);
+    val fr:  res[usize, accessor.ReadError] = accessor.read_f32(?pos_plan, ?pos[0], 9);
     if (sel fr.err) { ret 1; }
     if (fr.ok != 9) { ret 1; }
     var k: usize = 0;
@@ -1174,8 +1235,8 @@ test "parse: accessor reads over the BIN chunk return exact values" {
     var idx_plan: accessor.Plan = ir.ok;
 
     var idx: [3]u16;
-    val ur: res[usize, accessor.ReadError] = accessor.read_u16(?idx_plan, ?idx[0], 3);
-    if (sel ur.err) { ret 1; }
+    val ur:  res[usize, accessor.ReadError] = accessor.read_u16(?idx_plan, ?idx[0], 3);
+    if (sel ur.err)                                { ret 1; }
     if (idx[0] != 0 || idx[1] != 1 || idx[2] != 2) { ret 1; }
     ret 0;
 }
@@ -1183,10 +1244,10 @@ test "parse: accessor reads over the BIN chunk return exact values" {
 test "parse: parse_document rejects a non-object root" {
     var a: allo.Allocator;
     page.make(?a);
-    val src: str = "[1,2,3]";
-    val r: res[doc.Document, DocumentError] = parse_document(src, 7, ?a);
-    if (sel r.ok) { ret 1; }
-    if (!sel r.err.invalid) { ret 1; }
+    val src: str                              = "[1,2,3]";
+    val r:   res[doc.Document, DocumentError] = parse_document(src, 7, ?a);
+    if (sel r.ok)                { ret 1; }
+    if (!sel r.err.invalid)      { ret 1; }
     if (!sel r.err.invalid.root) { ret 1; }
     ret 0;
 }
@@ -1200,7 +1261,7 @@ test "parse: the document outlives the JSON buffer it was parsed from" {
     page.make(?a);
 
     var jbuf: [1024]u8;
-    val jl: usize = fixture_json(?jbuf[0]);
+    val jl:   usize = fixture_json(?jbuf[0]);
 
     val dr: res[doc.Document, DocumentError] = parse_document(?jbuf[0], jl, ?a);
     if (sel dr.err) { ret 1; }
@@ -1210,10 +1271,10 @@ test "parse: the document outlives the JSON buffer it was parsed from" {
     var i: usize = 0;
     for (i < 1024) {
         jbuf[i] = 0xAA;
-        i = i + 1;
+        i       = i + 1;
     }
 
-    if (!str_equals(d.asset.version, "2.0")) { ret 1; }
+    if (!str_equals(d.asset.version, "2.0"))              { ret 1; }
     if (!str_equals(d.asset.generator, "mach-gltf-test")) { ret 1; }
     # an absent member is an owned empty string, never nil, so this is safe to
     # compare rather than needing a nil guard first
@@ -1229,10 +1290,10 @@ fun parse_text(src: str, a: *allo.Allocator) res[doc.Document, DocumentError] {
 test "parse: a required member that is absent is missing at its element" {
     var a: allo.Allocator;
     page.make(?a);
-    val src: str = "{\"asset\":{\"version\":\"2.0\"},\"accessors\":[{\"componentType\":5126,\"count\":1,\"type\":\"SCALAR\"},{\"componentType\":5126,\"type\":\"VEC3\"}]}";
-    val r: res[doc.Document, DocumentError] = parse_text(src, ?a);
-    if (sel r.ok) { ret 1; }
-    if (!sel r.err.missing) { ret 1; }
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"accessors\":[{\"componentType\":5126,\"count\":1,\"type\":\"SCALAR\"},{\"componentType\":5126,\"type\":\"VEC3\"}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
+    if (sel r.ok)                    { ret 1; }
+    if (!sel r.err.missing)          { ret 1; }
     if (!sel r.err.missing.accessor) { ret 1; }
     if (r.err.missing.accessor != 1) { ret 1; }
     ret 0;
@@ -1241,10 +1302,10 @@ test "parse: a required member that is absent is missing at its element" {
 test "parse: a code outside its enumeration is invalid" {
     var a: allo.Allocator;
     page.make(?a);
-    val src: str = "{\"asset\":{\"version\":\"2.0\"},\"materials\":[{},{\"alphaMode\":\"SHINY\"}]}";
-    val r: res[doc.Document, DocumentError] = parse_text(src, ?a);
-    if (sel r.ok) { ret 1; }
-    if (!sel r.err.invalid) { ret 1; }
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"materials\":[{},{\"alphaMode\":\"SHINY\"}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
+    if (sel r.ok)                    { ret 1; }
+    if (!sel r.err.invalid)          { ret 1; }
     if (!sel r.err.invalid.material) { ret 1; }
     if (r.err.invalid.material != 1) { ret 1; }
     ret 0;
@@ -1253,10 +1314,10 @@ test "parse: a code outside its enumeration is invalid" {
 test "parse: a negative index is invalid" {
     var a: allo.Allocator;
     page.make(?a);
-    val src: str = "{\"asset\":{\"version\":\"2.0\"},\"nodes\":[{\"mesh\":-1}]}";
-    val r: res[doc.Document, DocumentError] = parse_text(src, ?a);
-    if (sel r.ok) { ret 1; }
-    if (!sel r.err.invalid) { ret 1; }
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"nodes\":[{\"mesh\":-1}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
+    if (sel r.ok)                { ret 1; }
+    if (!sel r.err.invalid)      { ret 1; }
     if (!sel r.err.invalid.node) { ret 1; }
     if (r.err.invalid.node != 0) { ret 1; }
     ret 0;
@@ -1265,26 +1326,26 @@ test "parse: a negative index is invalid" {
 test "parse: absent optional members read none and take spec defaults" {
     var a: allo.Allocator;
     page.make(?a);
-    val src: str = "{\"asset\":{\"version\":\"2.0\"},\"nodes\":[{}],\"samplers\":[{\"magFilter\":9729}],\"animations\":[{\"samplers\":[{\"input\":0,\"output\":1}],\"channels\":[{\"sampler\":0,\"target\":{\"path\":\"weights\"}}]}]}";
-    val r: res[doc.Document, DocumentError] = parse_text(src, ?a);
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"nodes\":[{}],\"samplers\":[{\"magFilter\":9729}],\"animations\":[{\"samplers\":[{\"input\":0,\"output\":1}],\"channels\":[{\"sampler\":0,\"target\":{\"path\":\"weights\"}}]}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
     if (sel r.err) { ret 1; }
     val d: doc.Document = r.ok;
     if (sel d.scene.some) { ret 1; }
 
     val nd: *doc.Node = ?d.nodes.data[0];
-    if (sel nd.mesh.some || sel nd.skin.some || sel nd.camera.some) { ret 1; }
+    if (sel nd.mesh.some || sel nd.skin.some || sel nd.camera.some)         { ret 1; }
     if (nd.has_matrix || nd.rotation[3] != 1.0f32 || nd.scale[0] != 1.0f32) { ret 1; }
 
     val sm: *doc.Sampler = ?d.samplers.data[0];
-    if (!sel sm.mag_filter.some) { ret 1; }
-    if (!sel sm.mag_filter.some.linear) { ret 1; }
-    if (sel sm.min_filter.some) { ret 1; }
+    if (!sel sm.mag_filter.some)                        { ret 1; }
+    if (!sel sm.mag_filter.some.linear)                 { ret 1; }
+    if (sel sm.min_filter.some)                         { ret 1; }
     if (!sel sm.wrap_s.repeat || !sel sm.wrap_t.repeat) { ret 1; }
 
     val an: *doc.Animation = ?d.animations.data[0];
     if (!sel an.samplers.data[0].interpolation.linear) { ret 1; }
     val ch: *doc.AnimationChannel = ?an.channels.data[0];
-    if (sel ch.target_node.some) { ret 1; }
+    if (sel ch.target_node.some)     { ret 1; }
     if (!sel ch.target_path.weights) { ret 1; }
     ret 0;
 }
@@ -1292,13 +1353,13 @@ test "parse: absent optional members read none and take spec defaults" {
 test "parse: string members are decoded, not copied raw" {
     var a: allo.Allocator;
     page.make(?a);
-    val src: str = "{\"asset\":{\"version\":\"2.0\"},\"images\":[{\"uri\":\"tex\\/a\\u0062.png\",\"name\":\"q\\\"t\"}]}";
-    val r: res[doc.Document, DocumentError] = parse_text(src, ?a);
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"images\":[{\"uri\":\"tex\\/a\\u0062.png\",\"name\":\"q\\\"t\"}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
     if (sel r.err) { ret 1; }
     val d: doc.Document = r.ok;
     if (!str_equals(d.images.data[0].uri, "tex/ab.png")) { ret 1; }
-    if (!str_equals(d.images.data[0].name, "q\"t")) { ret 1; }
-    if (sel d.images.data[0].buffer_view.some) { ret 1; }
+    if (!str_equals(d.images.data[0].name, "q\"t"))      { ret 1; }
+    if (sel d.images.data[0].buffer_view.some)           { ret 1; }
     ret 0;
 }
 
@@ -1306,16 +1367,16 @@ test "parse: a document for another major version is refused" {
     var a: allo.Allocator;
     page.make(?a);
     val r: res[doc.Document, DocumentError] = parse_text("{\"asset\":{\"version\":\"1.0\"}}", ?a);
-    if (sel r.ok) { ret 1; }
+    if (sel r.ok)           { ret 1; }
     if (!sel r.err.version) { ret 1; }
 
     val later: res[doc.Document, DocumentError] = parse_text("{\"asset\":{\"version\":\"2.0\",\"minVersion\":\"2.1\"}}", ?a);
-    if (sel later.ok) { ret 1; }
+    if (sel later.ok)           { ret 1; }
     if (!sel later.err.version) { ret 1; }
 
     val absent: res[doc.Document, DocumentError] = parse_text("{\"scenes\":[]}", ?a);
-    if (sel absent.ok) { ret 1; }
-    if (!sel absent.err.missing) { ret 1; }
+    if (sel absent.ok)                 { ret 1; }
+    if (!sel absent.err.missing)       { ret 1; }
     if (!sel absent.err.missing.asset) { ret 1; }
     ret 0;
 }
@@ -1324,12 +1385,12 @@ test "parse: malformed JSON and a non-array collection are told apart" {
     var a: allo.Allocator;
     page.make(?a);
     val bad: res[doc.Document, DocumentError] = parse_text("{\"asset\":", ?a);
-    if (sel bad.ok) { ret 1; }
+    if (sel bad.ok)        { ret 1; }
     if (!sel bad.err.json) { ret 1; }
 
     val shape: res[doc.Document, DocumentError] = parse_text("{\"asset\":{\"version\":\"2.0\"},\"nodes\":{}}", ?a);
-    if (sel shape.ok) { ret 1; }
-    if (!sel shape.err.invalid) { ret 1; }
+    if (sel shape.ok)                { ret 1; }
+    if (!sel shape.err.invalid)      { ret 1; }
     if (!sel shape.err.invalid.root) { ret 1; }
     ret 0;
 }
@@ -1339,18 +1400,18 @@ test "parse: load_glb keeps container and document failures apart" {
     page.make(?a);
 
     var short: [4]u8;
-    val cr: res[Loaded, LoadError] = load_glb(?short[0], 4, ?a);
-    if (sel cr.ok) { ret 1; }
-    if (!sel cr.err.container) { ret 1; }
+    val cr:    res[Loaded, LoadError] = load_glb(?short[0], 4, ?a);
+    if (sel cr.ok)                   { ret 1; }
+    if (!sel cr.err.container)       { ret 1; }
     if (!sel cr.err.container.short) { ret 1; }
 
     var jbuf: [16]u8;
-    val jl: usize = append_cstr(?jbuf[0], 0, "[]");
-    var buf: [64]u8;
-    val n: usize = assemble_glb(?buf[0], ?jbuf[0], jl, nil, 0);
-    val dr: res[Loaded, LoadError] = load_glb(?buf[0], n, ?a);
-    if (sel dr.ok) { ret 1; }
-    if (!sel dr.err.document) { ret 1; }
+    val jl:   usize                  = append_cstr(?jbuf[0], 0, "[]");
+    var buf:  [64]u8;
+    val n:    usize                  = assemble_glb(?buf[0], ?jbuf[0], jl, nil, 0);
+    val dr:   res[Loaded, LoadError] = load_glb(?buf[0], n, ?a);
+    if (sel dr.ok)                    { ret 1; }
+    if (!sel dr.err.document)         { ret 1; }
     if (!sel dr.err.document.invalid) { ret 1; }
     ret 0;
 }
