@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ci: CI runs the family pipeline (`briar-systems/.github` `mach-lib.yml`) on the pinned, checksum-verified mach seed: debug and release build and test, `mach fmt --check` and an all-targets release build on x86_64-linux for pull requests into dev, plus native aarch64-linux, windows and darwin legs for pull requests into main. A `gate` job is the one required check.
 - **Builds with Mach 5.0 and std 2.1.** The dependency is `[dep.std]`, pinned by the committed `dep/std` gitlink, and `mach.lock` is gone. Every profile states its full field set and the linux-x86_64 target, debug profile and library artifact are the defaults.
 - **Failures are closed error tags, not strings.** `Result[T, str]` becomes `res[T, E]`: `read_header`, `chunk_iter` and `parse_glb` fail with `ContainerError`; `parse_document` with `DocumentError` (`json`, `alloc`, `version`, `missing: Site`, `invalid: Site`); `load_glb` with `LoadError` (`container`, `document`); `plan` with `PlanError`; `read_f32`, `read_u32`, `read_u16` and `read_u8` with `ReadError` (`component_type`, `capacity`).
 - **`chunk_next(it)` returns `res[opt[Chunk], ContainerError]`** instead of filling an out parameter and returning a boolean.
