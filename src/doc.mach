@@ -21,11 +21,11 @@
 # this module is data plus the small numeric helpers that describe accessor
 # element layout; the JSON bridge lives in gltf.parse.
 
+use std.collections.slice;
 use std.types.bool.bool;
 use std.types.option.opt;
 use std.types.size.usize;
 use std.types.string.str;
-use slice: std.collections.slice;
 
 # glTF accessor component type (the OpenGL scalar type codes 5120 through 5126)
 pub tag ComponentType: u8 {
@@ -464,32 +464,32 @@ pub rec Document {
 
 test "doc: component_count covers every element type" {
     if (component_count(AccessorType.scalar{}) != 1) { ret 1; }
-    if (component_count(AccessorType.vec2{}) != 2) { ret 1; }
-    if (component_count(AccessorType.vec3{}) != 3) { ret 1; }
-    if (component_count(AccessorType.vec4{}) != 4) { ret 1; }
-    if (component_count(AccessorType.mat2{}) != 4) { ret 1; }
-    if (component_count(AccessorType.mat3{}) != 9) { ret 1; }
-    if (component_count(AccessorType.mat4{}) != 16) { ret 1; }
+    if (component_count(AccessorType.vec2{}) != 2)   { ret 1; }
+    if (component_count(AccessorType.vec3{}) != 3)   { ret 1; }
+    if (component_count(AccessorType.vec4{}) != 4)   { ret 1; }
+    if (component_count(AccessorType.mat2{}) != 4)   { ret 1; }
+    if (component_count(AccessorType.mat3{}) != 9)   { ret 1; }
+    if (component_count(AccessorType.mat4{}) != 16)  { ret 1; }
     ret 0;
 }
 
 test "doc: component_size covers every component type" {
-    if (component_size(ComponentType.byte{}) != 1) { ret 1; }
-    if (component_size(ComponentType.unsigned_byte{}) != 1) { ret 1; }
-    if (component_size(ComponentType.short{}) != 2) { ret 1; }
+    if (component_size(ComponentType.byte{}) != 1)           { ret 1; }
+    if (component_size(ComponentType.unsigned_byte{}) != 1)  { ret 1; }
+    if (component_size(ComponentType.short{}) != 2)          { ret 1; }
     if (component_size(ComponentType.unsigned_short{}) != 2) { ret 1; }
-    if (component_size(ComponentType.unsigned_int{}) != 4) { ret 1; }
-    if (component_size(ComponentType.float{}) != 4) { ret 1; }
+    if (component_size(ComponentType.unsigned_int{}) != 4)   { ret 1; }
+    if (component_size(ComponentType.float{}) != 4)          { ret 1; }
     ret 0;
 }
 
 test "doc: element_size multiplies component count by component width" {
     var a: Accessor;
-    a.element_type = AccessorType.vec3{};
+    a.element_type   = AccessorType.vec3{};
     a.component_type = ComponentType.float{};
     if (element_size(?a) != 12) { ret 1; }
 
-    a.element_type = AccessorType.scalar{};
+    a.element_type   = AccessorType.scalar{};
     a.component_type = ComponentType.unsigned_short{};
     if (element_size(?a) != 2) { ret 1; }
     ret 0;
