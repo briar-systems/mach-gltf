@@ -1,39 +1,100 @@
 # build a document model from glTF JSON
 #
-# walks a std.data.json Value tree into the typed gltf.doc records. numbers
-# come straight from the parser (integers via value_number, floats widened via
-# value_float), strings are copied into owned null-terminated `str` from the
+# walks a std.data.json Value tree into the typed gltf.doc records. strings are
+# decoded (JSON escapes resolved) into owned null-terminated `str` from the
 # caller's allocator, and so is every array. nothing in the result points into
 # the JSON bytes, so the caller may free or reuse them as soon as parsing
 # returns. an arena freed wholesale is the intended lifetime discipline,
-# matching std.data.json's own Value tree.
+# matching std.data.json's own Value tree: a parse that fails part way leaves
+# what it allocated to that arena.
 #
-# strings were borrowed views into the input until the document model was made
-# self-contained. borrowing cost nothing to produce and cost every consumer a
-# non-standard string type plus a lifetime tie to a buffer they did not own.
+# the parser holds the input to the specification's shapes. a required member
+# that is absent is `missing`, and a member of the wrong JSON type, a negative
+# index or a code outside a glTF enumeration is `invalid`, each located at the
+# top-level element it was read under. an optional member that is absent takes
+# its specification default or reads `none`.
 
+use gltf.accessor;
+use gltf.bytes;
+use gltf.doc;
+use gltf.glb;
+use allo: std.allocator;
+use std.allocator.page;
+use std.collections.slice;
+use std.data.json;
+use text: std.text.string;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
-use std.types.char.char;
 use std.types.string.str;
 use std.types.string.str_equals;
-use text: std.text.string;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
-use json:     std.data.json;
-use allo:     std.allocator;
-use slice:    std.collections.slice;
-use doc:      gltf.doc;
-use glb:      gltf.glb;
-use bytes:    gltf.bytes;
-use accessor: gltf.accessor;
-use page:     std.allocator.page;
+use std.types.string.str_len;
+use std.types.string.str_starts_with;
+
+# where in a document a defect was found
+#
+# a defect inside a nested object (a primitive's attribute, a material's texture
+# reference, an animation's channel target) is located at the top-level element
+# that holds it.
+# ---
+# root:        the root object or one of its own members (`scene`, or a
+#              top-level collection that is not an array)
+# asset:       the `asset` object
+# buffer:      an element of `buffers`; carries its index
+# buffer_view: an element of `bufferViews`; carries its index
+# accessor:    an element of `accessors`; carries its index
+# mesh:        an element of `meshes`; carries its index
+# node:        an element of `nodes`; carries its index
+# scene:       an element of `scenes`; carries its index
+# material:    an element of `materials`; carries its index
+# texture:     an element of `textures`; carries its index
+# image:       an element of `images`; carries its index
+# sampler:     an element of `samplers`; carries its index
+# skin:        an element of `skins`; carries its index
+# animation:   an element of `animations`; carries its index
+pub tag Site: u8 {
+    root;
+    asset;
+    buffer:      usize;
+    buffer_view: usize;
+    accessor:    usize;
+    mesh:        usize;
+    node:        usize;
+    scene:       usize;
+    material:    usize;
+    texture:     usize;
+    image:       usize;
+    sampler:     usize;
+    skin:        usize;
+    animation:   usize;
+}
+
+# why JSON text is not a glTF 2.0 document this loader accepts
+# ---
+# json:    the text is not JSON
+# alloc:   the allocator refused storage for the document
+# version: the asset's version or minVersion names a glTF major version other than 2
+# missing: a member the specification requires is absent
+# invalid: a member has the wrong JSON type or a value outside its domain
+pub tag DocumentError: u8 {
+    json:  json.JsonError;
+    alloc: allo.Error;
+    version;
+    missing: Site;
+    invalid: Site;
+}
+
+# why a .glb buffer does not load
+# ---
+# container: the binary container is malformed
+# document:  the JSON chunk is not an accepted glTF document
+pub tag LoadError: u8 {
+    container: glb.ContainerError;
+    document:  DocumentError;
+}
 
 # a document parsed from a .glb together with its binary buffer
 # ---
@@ -46,821 +107,918 @@ pub rec Loaded {
     bin_len:  usize;
 }
 
-# read an integer member, or dflt when absent or not a number
-fun get_i64(obj: *json.Value, key: str, dflt: i64) i64 {
-    val m: *json.Value = json.value_find(obj, key);
-    if (m == nil) { ret dflt; }
-    if (!json.value_is_number(m)) { ret dflt; }
-    ret json.value_number(m);
+# the state one top-level element is read under
+#
+# readers record the first defect in fault and keep going, returning a
+# placeholder in place of the value they could not produce. an element whose
+# cursor holds a fault is discarded whole, so no placeholder reaches a Document.
+# ---
+# alloc: allocator for the element's strings and arrays
+# site:  the element being read
+# fault: the first defect found, none while the element is sound
+rec Cursor {
+    alloc: *allo.Allocator;
+    site:  Site;
+    fault: opt[DocumentError];
 }
 
-# read a non-negative integer member, or dflt when absent or invalid
-fun get_usize(obj: *json.Value, key: str, dflt: usize) usize {
-    val n: i64 = get_i64(obj, key, dflt::i64);
-    if (n < 0) { ret dflt; }
+# record a defect unless one is already recorded
+fun fail(c: *Cursor, e: DocumentError) {
+    val first: bool = sel c.fault.none;
+    if (first) { c.fault = opt[DocumentError].some{e}; }
+}
+
+fun missing(c: *Cursor) {
+    fail(c, DocumentError.missing{c.site});
+}
+
+fun invalid(c: *Cursor) {
+    fail(c, DocumentError.invalid{c.site});
+}
+
+# a non-negative JSON integer
+fun integer(c: *Cursor, v: *json.Value) usize {
+    if (!json.value_is_number(v) || json.value_is_float(v)) {
+        invalid(c);
+        ret 0;
+    }
+    val n: i64 = json.value_number(v);
+    if (n < 0) {
+        invalid(c);
+        ret 0;
+    }
     ret n::usize;
 }
 
-# read an optional index member, NONE when absent
-fun get_index(obj: *json.Value, key: str) i64 {
-    ret get_i64(obj, key, doc.NONE);
+# a JSON number of either spelling as f32
+fun number(c: *Cursor, v: *json.Value) f32 {
+    if (!json.value_is_number(v)) {
+        invalid(c);
+        ret 0.0f32;
+    }
+    ret json.value_float(v)::f32;
 }
 
-# read a float member (int or float), or dflt when absent or not a number
-fun get_f32(obj: *json.Value, key: str, dflt: f32) f32 {
-    val m: *json.Value = json.value_find(obj, key);
-    if (m == nil) { ret dflt; }
-    if (!json.value_is_number(m)) { ret dflt; }
-    ret json.value_float(m)::f32;
+# a required object member
+fun need_object(c: *Cursor, obj: *json.Value, key: str) opt[*json.Value] {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) {
+        missing(c);
+        ret m;
+    }
+    if (!json.value_is_object(m.some)) {
+        invalid(c);
+        ret opt[*json.Value].none{};
+    }
+    ret m;
 }
 
-# read a boolean member, or dflt when absent or not a boolean
-fun get_bool(obj: *json.Value, key: str, dflt: bool) bool {
-    val m: *json.Value = json.value_find(obj, key);
-    if (m == nil) { ret dflt; }
-    if (!json.value_is_bool(m)) { ret dflt; }
-    ret json.value_bool(m);
+# an optional object member, none when absent
+fun get_object(c: *Cursor, obj: *json.Value, key: str) opt[*json.Value] {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) { ret m; }
+    if (!json.value_is_object(m.some)) {
+        invalid(c);
+        ret opt[*json.Value].none{};
+    }
+    ret m;
 }
 
-# read a string member as an owned copy, an owned empty string when absent
+# a required non-negative integer member
+fun need_usize(c: *Cursor, obj: *json.Value, key: str) usize {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) {
+        missing(c);
+        ret 0;
+    }
+    ret integer(c, m.some);
+}
+
+# an optional non-negative integer member, dflt when absent
+fun get_usize(c: *Cursor, obj: *json.Value, key: str, dflt: usize) usize {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) { ret dflt; }
+    ret integer(c, m.some);
+}
+
+# an optional index or code member, none when absent
+fun opt_usize(c: *Cursor, obj: *json.Value, key: str) opt[usize] {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) { ret opt[usize].none{}; }
+    ret opt[usize].some{integer(c, m.some)};
+}
+
+# an optional number member, dflt when absent
+fun get_f32(c: *Cursor, obj: *json.Value, key: str, dflt: f32) f32 {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) { ret dflt; }
+    ret number(c, m.some);
+}
+
+# an optional boolean member, dflt when absent
+fun get_bool(c: *Cursor, obj: *json.Value, key: str, dflt: bool) bool {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) { ret dflt; }
+    if (!json.value_is_bool(m.some)) {
+        invalid(c);
+        ret dflt;
+    }
+    ret json.value_bool(m.some);
+}
+
+# an optional array member of exactly n numbers, copied into out
 #
-# the JSON value carries a pointer and a length into the source bytes and is
-# not null-terminated, so this copies rather than borrows: str_dup_range takes
-# the length explicitly and never scans for a terminator.
-#
-# returns nil ONLY on allocation failure, never for an absent member. callers
-# allocate several strings in a row and test them together before returning,
-# which keeps the failure check to one line per record instead of three per
-# field.
-fun get_str(obj: *json.Value, key: str, alloc: *allo.Allocator) str {
-    var len: usize = 0;
-    var p:   *u8   = nil;
-    val m: *json.Value = json.value_find(obj, key);
-    if (m != nil && json.value_is_string(m)) { p = json.value_string(m, ?len); }
-    val r: Result[str, str] = text.str_dup_range(alloc, p::str, 0, len);
-    if (is_err[str, str](r)) { ret nil; }
-    ret unwrap_ok[str, str](r);
-}
-
-# the i-th object key as an owned copy
-fun key_own(obj: *json.Value, i: usize, alloc: *allo.Allocator) str {
-    val k:    str   = json.value_key(obj, i);
-    val klen: usize = json.value_key_len(obj, i);
-    val r: Result[str, str] = text.str_dup_range(alloc, k, 0, klen);
-    if (is_err[str, str](r)) { ret nil; }
-    ret unwrap_ok[str, str](r);
-}
-
-# copy up to cap numbers from a JSON array into out, returning the count
-fun read_floats(arr: *json.Value, out: *f32, cap: usize) usize {
-    if (arr == nil || !json.value_is_array(arr)) { ret 0; }
-    var n: usize = json.value_count(arr);
-    if (n > cap) { n = cap; }
+# out is left holding its defaults when the member is absent.
+# ---
+# ret: whether the member was present
+fun get_floats(c: *Cursor, obj: *json.Value, key: str, out: *f32, n: usize) bool {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) { ret false; }
+    val arr: *json.Value = m.some;
+    if (!json.value_is_array(arr) || json.value_count(arr) != n) {
+        invalid(c);
+        ret true;
+    }
     var i: usize = 0;
     for (i < n) {
-        val e: *json.Value = json.value_get(arr, i);
-        if (e != nil && json.value_is_number(e)) {
-            out[i] = json.value_float(e)::f32;
-        } or {
-            out[i] = 0.0f32;
-        }
-        i = i + 1;
+        val e: opt[*json.Value] = json.value_get(arr, i);
+        if (sel e.none) { brk; }
+        out[i] = number(c, e.some);
+        i      = i + 1;
     }
-    ret n;
+    ret true;
 }
 
-# copy a member array of numbers into out, returning the count
-fun read_float_member(obj: *json.Value, key: str, out: *f32, cap: usize) usize {
-    ret read_floats(json.value_find(obj, key), out, cap);
-}
-
-# allocate a Slice[i64] from a member array of indices
-fun parse_index_slice(obj: *json.Value, key: str, alloc: *allo.Allocator) Result[slice.Slice[i64], str] {
-    val arr: *json.Value = json.value_find(obj, key);
-    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[i64], str](slice.make[i64](nil, 0)); }
+# an optional array member of 1 to cap numbers, copied into out
+fun get_bounds(c: *Cursor, obj: *json.Value, key: str, out: *f32, cap: usize) opt[usize] {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) { ret opt[usize].none{}; }
+    val arr: *json.Value = m.some;
+    if (!json.value_is_array(arr)) {
+        invalid(c);
+        ret opt[usize].none{};
+    }
     val n: usize = json.value_count(arr);
-    if (n == 0) { ret ok[slice.Slice[i64], str](slice.make[i64](nil, 0)); }
+    if (n == 0 || n > cap) {
+        invalid(c);
+        ret opt[usize].none{};
+    }
+    get_floats(c, obj, key, out, n);
+    ret opt[usize].some{n};
+}
 
-    val ar: Result[*i64, str] = allo.allocate[i64](alloc, n);
-    if (is_err[*i64, str](ar)) { ret err[slice.Slice[i64], str](unwrap_err[*i64, str](ar)); }
-    val data: *i64 = unwrap_ok[*i64, str](ar);
+# a JSON string value decoded into an owned null-terminated copy
+fun decode(c: *Cursor, v: *json.Value) str {
+    if (!json.value_is_string(v)) {
+        invalid(c);
+        ret "";
+    }
+    val sized: res[usize, json.JsonError] = json.value_string_decode(v, nil, 0);
+    if (sel sized.err) {
+        invalid(c);
+        ret "";
+    }
+    val n:  usize                = sized.ok;
+    val ar: res[*u8, allo.Error] = allo.allocate[u8](c.alloc, n + 1);
+    if (sel ar.err) {
+        fail(c, DocumentError.alloc{ar.err});
+        ret "";
+    }
+    val buf: *u8                        = ar.ok;
+    val dr:  res[usize, json.JsonError] = json.value_string_decode(v, buf, n);
+    if (sel dr.err) {
+        invalid(c);
+        ret "";
+    }
+    buf[n] = 0;
+    ret buf;
+}
+
+# an optional string member as an owned copy, an owned empty string when absent
+fun get_str(c: *Cursor, obj: *json.Value, key: str) str {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) {
+        val r: res[str, allo.Error] = text.str_dup(c.alloc, "");
+        if (sel r.err) {
+            fail(c, DocumentError.alloc{r.err});
+            ret "";
+        }
+        ret r.ok;
+    }
+    ret decode(c, m.some);
+}
+
+# a required string member as an owned copy
+fun need_str(c: *Cursor, obj: *json.Value, key: str) str {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) {
+        missing(c);
+        ret "";
+    }
+    ret decode(c, m.some);
+}
+
+# the longest glTF enumeration word ("CUBICSPLINE") plus its terminator fits
+val WORD_CAP: usize = 16;
+
+# decode a short enumeration string member into buf, null-terminated
+#
+# a word that does not fit cannot match any enumeration, so it is invalid.
+# ---
+# ret: whether the member was present
+fun get_word(c: *Cursor, obj: *json.Value, key: str, buf: *u8) bool {
+    buf[0] = 0;
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) { ret false; }
+    if (!json.value_is_string(m.some)) {
+        invalid(c);
+        ret true;
+    }
+    val dr: res[usize, json.JsonError] = json.value_string_decode(m.some, buf, WORD_CAP - 1);
+    if (sel dr.err) {
+        invalid(c);
+        ret true;
+    }
+    if (dr.ok >= WORD_CAP) {
+        buf[0] = 0;
+        invalid(c);
+        ret true;
+    }
+    buf[dr.ok] = 0;
+    ret true;
+}
+
+# the elements of a JSON array, each read by parse into an owned slice
+fun elements[T](c: *Cursor, arr: *json.Value, parse: fun(*Cursor, *json.Value) T) slice.Slice[T] {
+    val n: usize = json.value_count(arr);
+    if (n == 0) { ret slice.make[T](nil, 0); }
+    val ar: res[*T, allo.Error] = allo.allocate[T](c.alloc, n);
+    if (sel ar.err) {
+        fail(c, DocumentError.alloc{ar.err});
+        ret slice.make[T](nil, 0);
+    }
+    val data: *T    = ar.ok;
+    var i:    usize = 0;
+    for (i < n) {
+        val e: opt[*json.Value] = json.value_get(arr, i);
+        if (sel e.none) { brk; }
+        data[i] = parse(c, e.some);
+        i       = i + 1;
+    }
+    ret slice.make[T](data, i);
+}
+
+# an optional array member read by parse, empty when absent
+fun get_list[T](c: *Cursor, obj: *json.Value, key: str, parse: fun(*Cursor, *json.Value) T) slice.Slice[T] {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) { ret slice.make[T](nil, 0); }
+    if (!json.value_is_array(m.some)) {
+        invalid(c);
+        ret slice.make[T](nil, 0);
+    }
+    ret elements[T](c, m.some, parse);
+}
+
+# a required array member read by parse
+fun need_list[T](c: *Cursor, obj: *json.Value, key: str, parse: fun(*Cursor, *json.Value) T) slice.Slice[T] {
+    val m: opt[*json.Value] = json.value_find(obj, key);
+    if (sel m.none) {
+        missing(c);
+        ret slice.make[T](nil, 0);
+    }
+    if (!json.value_is_array(m.some)) {
+        invalid(c);
+        ret slice.make[T](nil, 0);
+    }
+    ret elements[T](c, m.some, parse);
+}
+
+fun index_element(c: *Cursor, e: *json.Value) usize {
+    ret integer(c, e);
+}
+
+fun float_element(c: *Cursor, e: *json.Value) f32 {
+    ret number(c, e);
+}
+
+fun component_type(c: *Cursor, code: usize) doc.ComponentType {
+    if (code == 5120) { ret doc.ComponentType.byte{}; }
+    if (code == 5121) { ret doc.ComponentType.unsigned_byte{}; }
+    if (code == 5122) { ret doc.ComponentType.short{}; }
+    if (code == 5123) { ret doc.ComponentType.unsigned_short{}; }
+    if (code == 5125) { ret doc.ComponentType.unsigned_int{}; }
+    if (code == 5126) { ret doc.ComponentType.float{}; }
+    invalid(c);
+    ret doc.ComponentType.byte{};
+}
+
+fun accessor_type(c: *Cursor, w: str) doc.AccessorType {
+    if (str_equals(w, "SCALAR")) { ret doc.AccessorType.scalar{}; }
+    if (str_equals(w, "VEC2"))   { ret doc.AccessorType.vec2{}; }
+    if (str_equals(w, "VEC3"))   { ret doc.AccessorType.vec3{}; }
+    if (str_equals(w, "VEC4"))   { ret doc.AccessorType.vec4{}; }
+    if (str_equals(w, "MAT2"))   { ret doc.AccessorType.mat2{}; }
+    if (str_equals(w, "MAT3"))   { ret doc.AccessorType.mat3{}; }
+    if (str_equals(w, "MAT4"))   { ret doc.AccessorType.mat4{}; }
+    invalid(c);
+    ret doc.AccessorType.scalar{};
+}
+
+fun primitive_mode(c: *Cursor, code: usize) doc.PrimitiveMode {
+    if (code == 0) { ret doc.PrimitiveMode.points{}; }
+    if (code == 1) { ret doc.PrimitiveMode.lines{}; }
+    if (code == 2) { ret doc.PrimitiveMode.line_loop{}; }
+    if (code == 3) { ret doc.PrimitiveMode.line_strip{}; }
+    if (code == 4) { ret doc.PrimitiveMode.triangles{}; }
+    if (code == 5) { ret doc.PrimitiveMode.triangle_strip{}; }
+    if (code == 6) { ret doc.PrimitiveMode.triangle_fan{}; }
+    invalid(c);
+    ret doc.PrimitiveMode.triangles{};
+}
+
+fun buffer_target(c: *Cursor, code: usize) doc.BufferTarget {
+    if (code == 34962) { ret doc.BufferTarget.array_buffer{}; }
+    if (code == 34963) { ret doc.BufferTarget.element_array_buffer{}; }
+    invalid(c);
+    ret doc.BufferTarget.array_buffer{};
+}
+
+fun mag_filter(c: *Cursor, code: usize) doc.MagFilter {
+    if (code == 9728) { ret doc.MagFilter.nearest{}; }
+    if (code == 9729) { ret doc.MagFilter.linear{}; }
+    invalid(c);
+    ret doc.MagFilter.nearest{};
+}
+
+fun min_filter(c: *Cursor, code: usize) doc.MinFilter {
+    if (code == 9728) { ret doc.MinFilter.nearest{}; }
+    if (code == 9729) { ret doc.MinFilter.linear{}; }
+    if (code == 9984) { ret doc.MinFilter.nearest_mipmap_nearest{}; }
+    if (code == 9985) { ret doc.MinFilter.linear_mipmap_nearest{}; }
+    if (code == 9986) { ret doc.MinFilter.nearest_mipmap_linear{}; }
+    if (code == 9987) { ret doc.MinFilter.linear_mipmap_linear{}; }
+    invalid(c);
+    ret doc.MinFilter.nearest{};
+}
+
+fun wrap_mode(c: *Cursor, code: usize) doc.WrapMode {
+    if (code == 33071) { ret doc.WrapMode.clamp_to_edge{}; }
+    if (code == 33648) { ret doc.WrapMode.mirrored_repeat{}; }
+    if (code == 10497) { ret doc.WrapMode.repeat{}; }
+    invalid(c);
+    ret doc.WrapMode.repeat{};
+}
+
+fun interpolation(c: *Cursor, w: str) doc.Interpolation {
+    if (str_equals(w, "LINEAR"))      { ret doc.Interpolation.linear{}; }
+    if (str_equals(w, "STEP"))        { ret doc.Interpolation.step{}; }
+    if (str_equals(w, "CUBICSPLINE")) { ret doc.Interpolation.cubic_spline{}; }
+    invalid(c);
+    ret doc.Interpolation.linear{};
+}
+
+fun target_path(c: *Cursor, w: str) doc.TargetPath {
+    if (str_equals(w, "translation")) { ret doc.TargetPath.translation{}; }
+    if (str_equals(w, "rotation"))    { ret doc.TargetPath.rotation{}; }
+    if (str_equals(w, "scale"))       { ret doc.TargetPath.scale{}; }
+    if (str_equals(w, "weights"))     { ret doc.TargetPath.weights{}; }
+    invalid(c);
+    ret doc.TargetPath.translation{};
+}
+
+fun alpha_mode(c: *Cursor, w: str) doc.AlphaMode {
+    if (str_equals(w, "OPAQUE")) { ret doc.AlphaMode.opaque{}; }
+    if (str_equals(w, "MASK"))   { ret doc.AlphaMode.mask{}; }
+    if (str_equals(w, "BLEND"))  { ret doc.AlphaMode.blend{}; }
+    invalid(c);
+    ret doc.AlphaMode.opaque{};
+}
+
+fun parse_buffer(c: *Cursor, e: *json.Value) doc.Buffer {
+    var b: doc.Buffer;
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret b;
+    }
+    b.byte_length = need_usize(c, e, "byteLength");
+    b.uri         = get_str(c, e, "uri");
+    b.name        = get_str(c, e, "name");
+    ret b;
+}
+
+fun parse_buffer_view(c: *Cursor, e: *json.Value) doc.BufferView {
+    var v: doc.BufferView;
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret v;
+    }
+    v.buffer      = need_usize(c, e, "buffer");
+    v.byte_offset = get_usize(c, e, "byteOffset", 0);
+    v.byte_length = need_usize(c, e, "byteLength");
+    v.byte_stride = get_usize(c, e, "byteStride", 0);
+    val target: opt[usize] = opt_usize(c, e, "target");
+    if (sel target.some) { v.target = opt[doc.BufferTarget].some{buffer_target(c, target.some)}; }
+    v.name = get_str(c, e, "name");
+    ret v;
+}
+
+fun parse_accessor(c: *Cursor, e: *json.Value) doc.Accessor {
+    var a: doc.Accessor;
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret a;
+    }
+    a.buffer_view    = opt_usize(c, e, "bufferView");
+    a.byte_offset    = get_usize(c, e, "byteOffset", 0);
+    a.component_type = component_type(c, need_usize(c, e, "componentType"));
+    a.normalized     = get_bool(c, e, "normalized", false);
+    a.count          = need_usize(c, e, "count");
+    a.name           = get_str(c, e, "name");
+
+    var word: [16]u8;
+    if (get_word(c, e, "type", ?word[0])) {
+        a.element_type = accessor_type(c, ?word[0]);
+    }
+    or {
+        missing(c);
+    }
+
+    a.bounds_len = 0;
+    val min_n: opt[usize] = get_bounds(c, e, "min", ?a.min[0], doc.MAX_COMPONENTS);
+    a.has_min = sel min_n.some;
+    if (sel min_n.some) { a.bounds_len = min_n.some; }
+    val max_n: opt[usize] = get_bounds(c, e, "max", ?a.max[0], doc.MAX_COMPONENTS);
+    a.has_max = sel max_n.some;
+    if (sel max_n.some) {
+        if (max_n.some > a.bounds_len) { a.bounds_len = max_n.some; }
+    }
+    ret a;
+}
+
+# read an attribute-map object into owned attribute bindings
+fun parse_attributes(c: *Cursor, obj: *json.Value) slice.Slice[doc.Attribute] {
+    if (!json.value_is_object(obj)) {
+        invalid(c);
+        ret slice.make[doc.Attribute](nil, 0);
+    }
+    val n: usize = json.value_count(obj);
+    if (n == 0) { ret slice.make[doc.Attribute](nil, 0); }
+    val ar: res[*doc.Attribute, allo.Error] = allo.allocate[doc.Attribute](c.alloc, n);
+    if (sel ar.err) {
+        fail(c, DocumentError.alloc{ar.err});
+        ret slice.make[doc.Attribute](nil, 0);
+    }
+    val data: *doc.Attribute = ar.ok;
 
     var i: usize = 0;
     for (i < n) {
-        val e: *json.Value = json.value_get(arr, i);
-        if (e != nil && json.value_is_number(e)) {
-            data[i] = json.value_number(e);
-        } or {
-            data[i] = doc.NONE;
+        val k: opt[str] = json.value_key(obj, i);
+        if (sel k.none) { brk; }
+        val v: opt[*json.Value] = json.value_get(obj, i);
+        if (sel v.none) { brk; }
+        var at: doc.Attribute;
+        # attribute semantics are plain identifiers, so the raw key bytes are the name
+        val nr: res[str, allo.Error] = text.str_dup_range(c.alloc, k.some, 0, json.value_key_len(obj, i));
+        if (sel nr.err) {
+            fail(c, DocumentError.alloc{nr.err});
+            brk;
         }
-        i = i + 1;
+        at.name     = nr.ok;
+        at.accessor = integer(c, v.some);
+        data[i]     = at;
+        i           = i + 1;
     }
-    ret ok[slice.Slice[i64], str](slice.make[i64](data, n));
+    ret slice.make[doc.Attribute](data, i);
 }
 
-# allocate a Slice[f32] from a member array of numbers
-fun parse_float_slice(obj: *json.Value, key: str, alloc: *allo.Allocator) Result[slice.Slice[f32], str] {
-    val arr: *json.Value = json.value_find(obj, key);
-    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[f32], str](slice.make[f32](nil, 0)); }
-    val n: usize = json.value_count(arr);
-    if (n == 0) { ret ok[slice.Slice[f32], str](slice.make[f32](nil, 0)); }
-
-    val ar: Result[*f32, str] = allo.allocate[f32](alloc, n);
-    if (is_err[*f32, str](ar)) { ret err[slice.Slice[f32], str](unwrap_err[*f32, str](ar)); }
-    val data: *f32 = unwrap_ok[*f32, str](ar);
-
-    read_floats(arr, data, n);
-    ret ok[slice.Slice[f32], str](slice.make[f32](data, n));
-}
-
-# read a material texture reference object member
-fun parse_texture_ref(obj: *json.Value, key: str) doc.TextureRef {
-    var t: doc.TextureRef;
-    t.index = doc.NONE;
-    t.tex_coord = 0;
-    val m: *json.Value = json.value_find(obj, key);
-    if (m == nil || !json.value_is_object(m)) { ret t; }
-    t.index = get_index(m, "index");
-    t.tex_coord = get_i64(m, "texCoord", 0);
+fun parse_morph_target(c: *Cursor, e: *json.Value) doc.MorphTarget {
+    var t: doc.MorphTarget;
+    t.attributes = parse_attributes(c, e);
     ret t;
 }
 
-# read the top-level asset metadata
-fun parse_asset(root: *json.Value, alloc: *allo.Allocator) Result[doc.Asset, str] {
-    var a: doc.Asset;
-    # a missing asset object still yields owned empty strings, so every field
-    # of a returned Document is a valid str regardless of what the input omitted
-    var m: *json.Value = json.value_find(root, "asset");
-    if (m != nil && !json.value_is_object(m)) { m = nil; }
-    a.version     = get_str(m, "version",    alloc);
-    a.min_version = get_str(m, "minVersion", alloc);
-    a.generator   = get_str(m, "generator",  alloc);
-    a.copyright   = get_str(m, "copyright",  alloc);
-    if (a.version == nil || a.min_version == nil || a.generator == nil || a.copyright == nil) {
-        ret err[doc.Asset, str]("out of memory reading asset strings");
-    }
-    ret ok[doc.Asset, str](a);
-}
-
-# read one buffer definition
-fun parse_buffer(e: *json.Value, alloc: *allo.Allocator) Result[doc.Buffer, str] {
-    var b: doc.Buffer;
-    b.byte_length = get_usize(e, "byteLength", 0);
-    b.uri  = get_str(e, "uri",  alloc);
-    b.name = get_str(e, "name", alloc);
-    if (b.uri == nil || b.name == nil) { ret err[doc.Buffer, str]("out of memory reading buffer strings"); }
-    ret ok[doc.Buffer, str](b);
-}
-
-# read one buffer view definition
-fun parse_buffer_view(e: *json.Value, alloc: *allo.Allocator) Result[doc.BufferView, str] {
-    var v: doc.BufferView;
-    v.buffer = get_index(e, "buffer");
-    v.byte_offset = get_usize(e, "byteOffset", 0);
-    v.byte_length = get_usize(e, "byteLength", 0);
-    v.byte_stride = get_usize(e, "byteStride", 0);
-    v.target = get_index(e, "target");
-    v.name = get_str(e, "name", alloc);
-    if (v.name == nil) { ret err[doc.BufferView, str]("out of memory reading bufferView name"); }
-    ret ok[doc.BufferView, str](v);
-}
-
-# map a glTF accessor type string to an AccessorType
-# ---
-# ret: the matching type, or an error for an unrecognized string
-fun accessor_type(v: str) Result[doc.AccessorType, str] {
-    if (str_equals(v, "SCALAR")) { ret ok[doc.AccessorType, str](doc.TYPE_SCALAR); }
-    if (str_equals(v, "VEC2"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC2); }
-    if (str_equals(v, "VEC3"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC3); }
-    if (str_equals(v, "VEC4"))   { ret ok[doc.AccessorType, str](doc.TYPE_VEC4); }
-    if (str_equals(v, "MAT2"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT2); }
-    if (str_equals(v, "MAT3"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT3); }
-    if (str_equals(v, "MAT4"))   { ret ok[doc.AccessorType, str](doc.TYPE_MAT4); }
-    ret err[doc.AccessorType, str]("unknown accessor type");
-}
-
-# read one accessor definition, including optional min/max bounds
-# ---
-# ret: the accessor, or an error for an unrecognized element type
-fun parse_accessor(e: *json.Value, alloc: *allo.Allocator) Result[doc.Accessor, str] {
-    var a: doc.Accessor;
-    a.buffer_view = get_index(e, "bufferView");
-    a.byte_offset = get_usize(e, "byteOffset", 0);
-    a.component_type = get_i64(e, "componentType", 0)::doc.ComponentType;
-    a.normalized = get_bool(e, "normalized", false);
-    a.count = get_usize(e, "count", 0);
-    a.bounds_len = 0;
-    a.has_min = false;
-    a.has_max = false;
-    a.name = get_str(e, "name", alloc);
-    if (a.name == nil) { ret err[doc.Accessor, str]("out of memory reading accessor name"); }
-
-    val ty: str = get_str(e, "type", alloc);
-    if (ty == nil) { ret err[doc.Accessor, str]("out of memory reading accessor type"); }
-    val tr: Result[doc.AccessorType, str] = accessor_type(ty);
-    if (is_err[doc.AccessorType, str](tr)) { ret err[doc.Accessor, str](unwrap_err[doc.AccessorType, str](tr)); }
-    a.element_type = unwrap_ok[doc.AccessorType, str](tr);
-
-    val min_m: *json.Value = json.value_find(e, "min");
-    if (min_m != nil && json.value_is_array(min_m)) {
-        a.bounds_len = read_floats(min_m, ?a.min[0], doc.MAX_COMPONENTS);
-        a.has_min = true;
-    }
-    val max_m: *json.Value = json.value_find(e, "max");
-    if (max_m != nil && json.value_is_array(max_m)) {
-        val ml: usize = read_floats(max_m, ?a.max[0], doc.MAX_COMPONENTS);
-        if (ml > a.bounds_len) { a.bounds_len = ml; }
-        a.has_max = true;
-    }
-    ret ok[doc.Accessor, str](a);
-}
-
-# read an attribute-map object into a Slice[Attribute]
-fun parse_attributes(obj: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.Attribute], str] {
-    if (obj == nil || !json.value_is_object(obj)) { ret ok[slice.Slice[doc.Attribute], str](slice.make[doc.Attribute](nil, 0)); }
-    val n: usize = json.value_count(obj);
-    if (n == 0) { ret ok[slice.Slice[doc.Attribute], str](slice.make[doc.Attribute](nil, 0)); }
-
-    val ar: Result[*doc.Attribute, str] = allo.allocate[doc.Attribute](alloc, n);
-    if (is_err[*doc.Attribute, str](ar)) { ret err[slice.Slice[doc.Attribute], str](unwrap_err[*doc.Attribute, str](ar)); }
-    val data: *doc.Attribute = unwrap_ok[*doc.Attribute, str](ar);
-
-    var i: usize = 0;
-    for (i < n) {
-        var at: doc.Attribute;
-        at.name = key_own(obj, i, alloc);
-        if (at.name == nil) { ret err[slice.Slice[doc.Attribute], str]("out of memory reading attribute name"); }
-        val cv: *json.Value = json.value_get(obj, i);
-        if (cv != nil && json.value_is_number(cv)) {
-            at.accessor = json.value_number(cv);
-        } or {
-            at.accessor = doc.NONE;
-        }
-        data[i] = at;
-        i = i + 1;
-    }
-    ret ok[slice.Slice[doc.Attribute], str](slice.make[doc.Attribute](data, n));
-}
-
-# read a primitive's morph target array
-fun parse_morph_targets(prim: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.MorphTarget], str] {
-    val arr: *json.Value = json.value_find(prim, "targets");
-    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[doc.MorphTarget], str](slice.make[doc.MorphTarget](nil, 0)); }
-    val n: usize = json.value_count(arr);
-    if (n == 0) { ret ok[slice.Slice[doc.MorphTarget], str](slice.make[doc.MorphTarget](nil, 0)); }
-
-    val ar: Result[*doc.MorphTarget, str] = allo.allocate[doc.MorphTarget](alloc, n);
-    if (is_err[*doc.MorphTarget, str](ar)) { ret err[slice.Slice[doc.MorphTarget], str](unwrap_err[*doc.MorphTarget, str](ar)); }
-    val data: *doc.MorphTarget = unwrap_ok[*doc.MorphTarget, str](ar);
-
-    var i: usize = 0;
-    for (i < n) {
-        val tr: Result[slice.Slice[doc.Attribute], str] = parse_attributes(json.value_get(arr, i), alloc);
-        if (is_err[slice.Slice[doc.Attribute], str](tr)) { ret err[slice.Slice[doc.MorphTarget], str](unwrap_err[slice.Slice[doc.Attribute], str](tr)); }
-        var t: doc.MorphTarget;
-        t.attributes = unwrap_ok[slice.Slice[doc.Attribute], str](tr);
-        data[i] = t;
-        i = i + 1;
-    }
-    ret ok[slice.Slice[doc.MorphTarget], str](slice.make[doc.MorphTarget](data, n));
-}
-
-# read one mesh primitive
-fun parse_primitive(e: *json.Value, alloc: *allo.Allocator) Result[doc.Primitive, str] {
+fun parse_primitive(c: *Cursor, e: *json.Value) doc.Primitive {
     var p: doc.Primitive;
-    p.indices = get_index(e, "indices");
-    p.material = get_index(e, "material");
-    p.mode = get_i64(e, "mode", doc.MODE_TRIANGLES::i64)::doc.PrimitiveMode;
-
-    val atr: Result[slice.Slice[doc.Attribute], str] = parse_attributes(json.value_find(e, "attributes"), alloc);
-    if (is_err[slice.Slice[doc.Attribute], str](atr)) { ret err[doc.Primitive, str](unwrap_err[slice.Slice[doc.Attribute], str](atr)); }
-    p.attributes = unwrap_ok[slice.Slice[doc.Attribute], str](atr);
-
-    val mtr: Result[slice.Slice[doc.MorphTarget], str] = parse_morph_targets(e, alloc);
-    if (is_err[slice.Slice[doc.MorphTarget], str](mtr)) { ret err[doc.Primitive, str](unwrap_err[slice.Slice[doc.MorphTarget], str](mtr)); }
-    p.targets = unwrap_ok[slice.Slice[doc.MorphTarget], str](mtr);
-    ret ok[doc.Primitive, str](p);
-}
-
-# read one mesh and its primitives
-fun parse_mesh(e: *json.Value, alloc: *allo.Allocator) Result[doc.Mesh, str] {
-    var m: doc.Mesh;
-    m.name = get_str(e, "name", alloc);
-    if (m.name == nil) { ret err[doc.Mesh, str]("out of memory reading mesh name"); }
-
-    val wr: Result[slice.Slice[f32], str] = parse_float_slice(e, "weights", alloc);
-    if (is_err[slice.Slice[f32], str](wr)) { ret err[doc.Mesh, str](unwrap_err[slice.Slice[f32], str](wr)); }
-    m.weights = unwrap_ok[slice.Slice[f32], str](wr);
-
-    val arr: *json.Value = json.value_find(e, "primitives");
-    if (arr == nil || !json.value_is_array(arr)) {
-        m.primitives = slice.make[doc.Primitive](nil, 0);
-        ret ok[doc.Mesh, str](m);
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret p;
     }
-    val n: usize = json.value_count(arr);
-    if (n == 0) {
-        m.primitives = slice.make[doc.Primitive](nil, 0);
-        ret ok[doc.Mesh, str](m);
+    val attrs: opt[*json.Value] = json.value_find(e, "attributes");
+    if (sel attrs.some) {
+        p.attributes = parse_attributes(c, attrs.some);
     }
-
-    val ar: Result[*doc.Primitive, str] = allo.allocate[doc.Primitive](alloc, n);
-    if (is_err[*doc.Primitive, str](ar)) { ret err[doc.Mesh, str](unwrap_err[*doc.Primitive, str](ar)); }
-    val data: *doc.Primitive = unwrap_ok[*doc.Primitive, str](ar);
-
-    var i: usize = 0;
-    for (i < n) {
-        val pr: Result[doc.Primitive, str] = parse_primitive(json.value_get(arr, i), alloc);
-        if (is_err[doc.Primitive, str](pr)) { ret err[doc.Mesh, str](unwrap_err[doc.Primitive, str](pr)); }
-        data[i] = unwrap_ok[doc.Primitive, str](pr);
-        i = i + 1;
+    or {
+        missing(c);
     }
-    m.primitives = slice.make[doc.Primitive](data, n);
-    ret ok[doc.Mesh, str](m);
-}
-
-# read one scene-graph node
-fun parse_node(e: *json.Value, alloc: *allo.Allocator) Result[doc.Node, str] {
-    var nd: doc.Node;
-    nd.mesh = get_index(e, "mesh");
-    nd.skin = get_index(e, "skin");
-    nd.camera = get_index(e, "camera");
-    nd.name = get_str(e, "name", alloc);
-    if (nd.name == nil) { ret err[doc.Node, str]("out of memory reading node name"); }
-
-    nd.translation[0] = 0.0f32; nd.translation[1] = 0.0f32; nd.translation[2] = 0.0f32;
-    nd.rotation[0] = 0.0f32; nd.rotation[1] = 0.0f32; nd.rotation[2] = 0.0f32; nd.rotation[3] = 1.0f32;
-    nd.scale[0] = 1.0f32; nd.scale[1] = 1.0f32; nd.scale[2] = 1.0f32;
-
-    val mat_m: *json.Value = json.value_find(e, "matrix");
-    if (mat_m != nil && json.value_is_array(mat_m)) {
-        read_floats(mat_m, ?nd.matrix[0], 16);
-        nd.has_matrix = true;
-    } or {
-        nd.has_matrix = false;
-    }
-    read_float_member(e, "translation", ?nd.translation[0], 3);
-    read_float_member(e, "rotation", ?nd.rotation[0], 4);
-    read_float_member(e, "scale", ?nd.scale[0], 3);
-
-    val cr: Result[slice.Slice[i64], str] = parse_index_slice(e, "children", alloc);
-    if (is_err[slice.Slice[i64], str](cr)) { ret err[doc.Node, str](unwrap_err[slice.Slice[i64], str](cr)); }
-    nd.children = unwrap_ok[slice.Slice[i64], str](cr);
-
-    val wr: Result[slice.Slice[f32], str] = parse_float_slice(e, "weights", alloc);
-    if (is_err[slice.Slice[f32], str](wr)) { ret err[doc.Node, str](unwrap_err[slice.Slice[f32], str](wr)); }
-    nd.weights = unwrap_ok[slice.Slice[f32], str](wr);
-    ret ok[doc.Node, str](nd);
-}
-
-# read one scene
-fun parse_scene(e: *json.Value, alloc: *allo.Allocator) Result[doc.Scene, str] {
-    var s: doc.Scene;
-    s.name = get_str(e, "name", alloc);
-    if (s.name == nil) { ret err[doc.Scene, str]("out of memory reading scene name"); }
-    val nr: Result[slice.Slice[i64], str] = parse_index_slice(e, "nodes", alloc);
-    if (is_err[slice.Slice[i64], str](nr)) { ret err[doc.Scene, str](unwrap_err[slice.Slice[i64], str](nr)); }
-    s.nodes = unwrap_ok[slice.Slice[i64], str](nr);
-    ret ok[doc.Scene, str](s);
-}
-
-# read a material's metallic-roughness parameters
-fun parse_pbr(mat: *json.Value) doc.PbrMetallicRoughness {
-    var p: doc.PbrMetallicRoughness;
-    p.base_color_factor[0] = 1.0f32; p.base_color_factor[1] = 1.0f32;
-    p.base_color_factor[2] = 1.0f32; p.base_color_factor[3] = 1.0f32;
-    p.metallic_factor = 1.0f32;
-    p.roughness_factor = 1.0f32;
-    p.base_color_texture.index = doc.NONE;
-    p.base_color_texture.tex_coord = 0;
-    p.metallic_roughness_texture.index = doc.NONE;
-    p.metallic_roughness_texture.tex_coord = 0;
-
-    val m: *json.Value = json.value_find(mat, "pbrMetallicRoughness");
-    if (m == nil || !json.value_is_object(m)) { ret p; }
-    read_float_member(m, "baseColorFactor", ?p.base_color_factor[0], 4);
-    p.metallic_factor = get_f32(m, "metallicFactor", 1.0f32);
-    p.roughness_factor = get_f32(m, "roughnessFactor", 1.0f32);
-    p.base_color_texture = parse_texture_ref(m, "baseColorTexture");
-    p.metallic_roughness_texture = parse_texture_ref(m, "metallicRoughnessTexture");
+    p.targets  = get_list[doc.MorphTarget](c, e, "targets", parse_morph_target);
+    p.indices  = opt_usize(c, e, "indices");
+    p.material = opt_usize(c, e, "material");
+    p.mode     = primitive_mode(c, get_usize(c, e, "mode", 4));
     ret p;
 }
 
-# map a glTF alpha mode string to an AlphaMode, default OPAQUE
-fun alpha_mode(v: str) doc.AlphaMode {
-    if (str_equals(v, "MASK"))  { ret doc.ALPHA_MASK; }
-    if (str_equals(v, "BLEND")) { ret doc.ALPHA_BLEND; }
-    ret doc.ALPHA_OPAQUE;
+fun parse_mesh(c: *Cursor, e: *json.Value) doc.Mesh {
+    var m: doc.Mesh;
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret m;
+    }
+    m.primitives = need_list[doc.Primitive](c, e, "primitives", parse_primitive);
+    m.weights    = get_list[f32](c, e, "weights", float_element);
+    m.name       = get_str(c, e, "name");
+    ret m;
 }
 
-# read one material
-fun parse_material(e: *json.Value, alloc: *allo.Allocator) Result[doc.Material, str] {
+fun parse_node(c: *Cursor, e: *json.Value) doc.Node {
+    var nd: doc.Node;
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret nd;
+    }
+    nd.children = get_list[usize](c, e, "children", index_element);
+    nd.mesh     = opt_usize(c, e, "mesh");
+    nd.skin     = opt_usize(c, e, "skin");
+    nd.camera   = opt_usize(c, e, "camera");
+
+    nd.translation[0] = 0.0f32;
+    nd.translation[1] = 0.0f32;
+    nd.translation[2] = 0.0f32;
+    nd.rotation[0]    = 0.0f32;
+    nd.rotation[1]    = 0.0f32;
+    nd.rotation[2]    = 0.0f32;
+    nd.rotation[3]    = 1.0f32;
+    nd.scale[0]       = 1.0f32;
+    nd.scale[1]       = 1.0f32;
+    nd.scale[2]       = 1.0f32;
+    nd.has_matrix     = get_floats(c, e, "matrix", ?nd.matrix[0], 16);
+    get_floats(c, e, "translation", ?nd.translation[0], 3);
+    get_floats(c, e, "rotation", ?nd.rotation[0], 4);
+    get_floats(c, e, "scale", ?nd.scale[0], 3);
+
+    nd.weights = get_list[f32](c, e, "weights", float_element);
+    nd.name    = get_str(c, e, "name");
+    ret nd;
+}
+
+fun parse_scene(c: *Cursor, e: *json.Value) doc.Scene {
+    var s: doc.Scene;
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret s;
+    }
+    s.nodes = get_list[usize](c, e, "nodes", index_element);
+    s.name  = get_str(c, e, "name");
+    ret s;
+}
+
+# an optional texture reference member, none when absent
+fun texture_ref(c: *Cursor, obj: *json.Value, key: str) opt[doc.TextureRef] {
+    val m: opt[*json.Value] = get_object(c, obj, key);
+    if (sel m.none) { ret opt[doc.TextureRef].none{}; }
+    var t: doc.TextureRef;
+    t.index     = need_usize(c, m.some, "index");
+    t.tex_coord = get_usize(c, m.some, "texCoord", 0);
+    ret opt[doc.TextureRef].some{t};
+}
+
+fun parse_pbr(c: *Cursor, mat: *json.Value) doc.PbrMetallicRoughness {
+    var p: doc.PbrMetallicRoughness;
+    p.base_color_factor[0] = 1.0f32;
+    p.base_color_factor[1] = 1.0f32;
+    p.base_color_factor[2] = 1.0f32;
+    p.base_color_factor[3] = 1.0f32;
+    p.metallic_factor      = 1.0f32;
+    p.roughness_factor     = 1.0f32;
+
+    val m: opt[*json.Value] = get_object(c, mat, "pbrMetallicRoughness");
+    if (sel m.none) { ret p; }
+    get_floats(c, m.some, "baseColorFactor", ?p.base_color_factor[0], 4);
+    p.metallic_factor            = get_f32(c, m.some, "metallicFactor", 1.0f32);
+    p.roughness_factor           = get_f32(c, m.some, "roughnessFactor", 1.0f32);
+    p.base_color_texture         = texture_ref(c, m.some, "baseColorTexture");
+    p.metallic_roughness_texture = texture_ref(c, m.some, "metallicRoughnessTexture");
+    ret p;
+}
+
+fun parse_material(c: *Cursor, e: *json.Value) doc.Material {
     var mt: doc.Material;
-    mt.pbr = parse_pbr(e);
-    mt.normal_texture = parse_texture_ref(e, "normalTexture");
-    mt.occlusion_texture = parse_texture_ref(e, "occlusionTexture");
-    mt.emissive_texture = parse_texture_ref(e, "emissiveTexture");
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret mt;
+    }
+    mt.pbr               = parse_pbr(c, e);
+    mt.normal_texture    = texture_ref(c, e, "normalTexture");
+    mt.occlusion_texture = texture_ref(c, e, "occlusionTexture");
+    mt.emissive_texture  = texture_ref(c, e, "emissiveTexture");
+
     mt.normal_scale = 1.0f32;
+    val nt: opt[*json.Value] = get_object(c, e, "normalTexture");
+    if (sel nt.some) { mt.normal_scale = get_f32(c, nt.some, "scale", 1.0f32); }
     mt.occlusion_strength = 1.0f32;
-    mt.emissive_factor[0] = 0.0f32; mt.emissive_factor[1] = 0.0f32; mt.emissive_factor[2] = 0.0f32;
-    mt.alpha_cutoff = get_f32(e, "alphaCutoff", 0.5f32);
-    mt.double_sided = get_bool(e, "doubleSided", false);
-    val am: str = get_str(e, "alphaMode", alloc);
-    mt.name = get_str(e, "name", alloc);
-    if (am == nil || mt.name == nil) { ret err[doc.Material, str]("out of memory reading material strings"); }
-    mt.alpha_mode = alpha_mode(am);
+    val ot: opt[*json.Value] = get_object(c, e, "occlusionTexture");
+    if (sel ot.some) { mt.occlusion_strength = get_f32(c, ot.some, "strength", 1.0f32); }
 
-    val nt: *json.Value = json.value_find(e, "normalTexture");
-    if (nt != nil && json.value_is_object(nt)) { mt.normal_scale = get_f32(nt, "scale", 1.0f32); }
-    val ot: *json.Value = json.value_find(e, "occlusionTexture");
-    if (ot != nil && json.value_is_object(ot)) { mt.occlusion_strength = get_f32(ot, "strength", 1.0f32); }
-    read_float_member(e, "emissiveFactor", ?mt.emissive_factor[0], 3);
-    ret ok[doc.Material, str](mt);
+    mt.emissive_factor[0] = 0.0f32;
+    mt.emissive_factor[1] = 0.0f32;
+    mt.emissive_factor[2] = 0.0f32;
+    get_floats(c, e, "emissiveFactor", ?mt.emissive_factor[0], 3);
+
+    var word: [16]u8;
+    mt.alpha_mode = doc.AlphaMode.opaque{};
+    if (get_word(c, e, "alphaMode", ?word[0])) { mt.alpha_mode = alpha_mode(c, ?word[0]); }
+    mt.alpha_cutoff = get_f32(c, e, "alphaCutoff", 0.5f32);
+    mt.double_sided = get_bool(c, e, "doubleSided", false);
+    mt.name         = get_str(c, e, "name");
+    ret mt;
 }
 
-# read one texture
-fun parse_texture(e: *json.Value, alloc: *allo.Allocator) Result[doc.Texture, str] {
+fun parse_texture(c: *Cursor, e: *json.Value) doc.Texture {
     var t: doc.Texture;
-    t.source = get_index(e, "source");
-    t.sampler = get_index(e, "sampler");
-    t.name = get_str(e, "name", alloc);
-    if (t.name == nil) { ret err[doc.Texture, str]("out of memory reading texture name"); }
-    ret ok[doc.Texture, str](t);
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret t;
+    }
+    t.source  = opt_usize(c, e, "source");
+    t.sampler = opt_usize(c, e, "sampler");
+    t.name    = get_str(c, e, "name");
+    ret t;
 }
 
-# read one image
-fun parse_image(e: *json.Value, alloc: *allo.Allocator) Result[doc.Image, str] {
+fun parse_image(c: *Cursor, e: *json.Value) doc.Image {
     var im: doc.Image;
-    im.uri         = get_str(e, "uri",      alloc);
-    im.mime_type   = get_str(e, "mimeType", alloc);
-    im.buffer_view = get_index(e, "bufferView");
-    im.name        = get_str(e, "name",     alloc);
-    if (im.uri == nil || im.mime_type == nil || im.name == nil) {
-        ret err[doc.Image, str]("out of memory reading image strings");
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret im;
     }
-    ret ok[doc.Image, str](im);
+    im.uri         = get_str(c, e, "uri");
+    im.mime_type   = get_str(c, e, "mimeType");
+    im.buffer_view = opt_usize(c, e, "bufferView");
+    im.name        = get_str(c, e, "name");
+    ret im;
 }
 
-# read one sampler
-fun parse_sampler(e: *json.Value, alloc: *allo.Allocator) Result[doc.Sampler, str] {
+fun parse_sampler(c: *Cursor, e: *json.Value) doc.Sampler {
     var sm: doc.Sampler;
-    sm.mag_filter = get_index(e, "magFilter");
-    sm.min_filter = get_index(e, "minFilter");
-    sm.wrap_s = get_i64(e, "wrapS", 10497);
-    sm.wrap_t = get_i64(e, "wrapT", 10497);
-    sm.name = get_str(e, "name", alloc);
-    if (sm.name == nil) { ret err[doc.Sampler, str]("out of memory reading sampler name"); }
-    ret ok[doc.Sampler, str](sm);
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret sm;
+    }
+    val mag: opt[usize] = opt_usize(c, e, "magFilter");
+    if (sel mag.some) { sm.mag_filter = opt[doc.MagFilter].some{mag_filter(c, mag.some)}; }
+    val min: opt[usize] = opt_usize(c, e, "minFilter");
+    if (sel min.some) { sm.min_filter = opt[doc.MinFilter].some{min_filter(c, min.some)}; }
+    sm.wrap_s = wrap_mode(c, get_usize(c, e, "wrapS", 10497));
+    sm.wrap_t = wrap_mode(c, get_usize(c, e, "wrapT", 10497));
+    sm.name   = get_str(c, e, "name");
+    ret sm;
 }
 
-# read one skin
-fun parse_skin(e: *json.Value, alloc: *allo.Allocator) Result[doc.Skin, str] {
+fun parse_skin(c: *Cursor, e: *json.Value) doc.Skin {
     var sk: doc.Skin;
-    sk.inverse_bind_matrices = get_index(e, "inverseBindMatrices");
-    sk.skeleton = get_index(e, "skeleton");
-    sk.name = get_str(e, "name", alloc);
-    if (sk.name == nil) { ret err[doc.Skin, str]("out of memory reading skin name"); }
-    val jr: Result[slice.Slice[i64], str] = parse_index_slice(e, "joints", alloc);
-    if (is_err[slice.Slice[i64], str](jr)) { ret err[doc.Skin, str](unwrap_err[slice.Slice[i64], str](jr)); }
-    sk.joints = unwrap_ok[slice.Slice[i64], str](jr);
-    ret ok[doc.Skin, str](sk);
-}
-
-# map a glTF interpolation string to an Interpolation, default LINEAR
-fun interpolation(v: str) doc.Interpolation {
-    if (str_equals(v, "STEP"))        { ret doc.INTERP_STEP; }
-    if (str_equals(v, "CUBICSPLINE")) { ret doc.INTERP_CUBICSPLINE; }
-    ret doc.INTERP_LINEAR;
-}
-
-# map a glTF channel target path string to a TargetPath, default TRANSLATION
-fun target_path(v: str) doc.TargetPath {
-    if (str_equals(v, "rotation")) { ret doc.PATH_ROTATION; }
-    if (str_equals(v, "scale"))    { ret doc.PATH_SCALE; }
-    if (str_equals(v, "weights"))  { ret doc.PATH_WEIGHTS; }
-    ret doc.PATH_TRANSLATION;
-}
-
-# read an animation's sampler array
-fun parse_anim_samplers(anim: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.AnimationSampler], str] {
-    val arr: *json.Value = json.value_find(anim, "samplers");
-    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[doc.AnimationSampler], str](slice.make[doc.AnimationSampler](nil, 0)); }
-    val n: usize = json.value_count(arr);
-    if (n == 0) { ret ok[slice.Slice[doc.AnimationSampler], str](slice.make[doc.AnimationSampler](nil, 0)); }
-
-    val ar: Result[*doc.AnimationSampler, str] = allo.allocate[doc.AnimationSampler](alloc, n);
-    if (is_err[*doc.AnimationSampler, str](ar)) { ret err[slice.Slice[doc.AnimationSampler], str](unwrap_err[*doc.AnimationSampler, str](ar)); }
-    val data: *doc.AnimationSampler = unwrap_ok[*doc.AnimationSampler, str](ar);
-
-    var i: usize = 0;
-    for (i < n) {
-        val e: *json.Value = json.value_get(arr, i);
-        var s: doc.AnimationSampler;
-        s.input = get_index(e, "input");
-        s.output = get_index(e, "output");
-        val ip: str = get_str(e, "interpolation", alloc);
-        if (ip == nil) { ret err[slice.Slice[doc.AnimationSampler], str]("out of memory reading interpolation"); }
-        s.interpolation = interpolation(ip);
-        data[i] = s;
-        i = i + 1;
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret sk;
     }
-    ret ok[slice.Slice[doc.AnimationSampler], str](slice.make[doc.AnimationSampler](data, n));
+    sk.inverse_bind_matrices = opt_usize(c, e, "inverseBindMatrices");
+    sk.skeleton              = opt_usize(c, e, "skeleton");
+    sk.joints                = need_list[usize](c, e, "joints", index_element);
+    sk.name                  = get_str(c, e, "name");
+    ret sk;
 }
 
-# read an animation's channel array
-fun parse_anim_channels(anim: *json.Value, alloc: *allo.Allocator) Result[slice.Slice[doc.AnimationChannel], str] {
-    val arr: *json.Value = json.value_find(anim, "channels");
-    if (arr == nil || !json.value_is_array(arr)) { ret ok[slice.Slice[doc.AnimationChannel], str](slice.make[doc.AnimationChannel](nil, 0)); }
-    val n: usize = json.value_count(arr);
-    if (n == 0) { ret ok[slice.Slice[doc.AnimationChannel], str](slice.make[doc.AnimationChannel](nil, 0)); }
-
-    val ar: Result[*doc.AnimationChannel, str] = allo.allocate[doc.AnimationChannel](alloc, n);
-    if (is_err[*doc.AnimationChannel, str](ar)) { ret err[slice.Slice[doc.AnimationChannel], str](unwrap_err[*doc.AnimationChannel, str](ar)); }
-    val data: *doc.AnimationChannel = unwrap_ok[*doc.AnimationChannel, str](ar);
-
-    var i: usize = 0;
-    for (i < n) {
-        val e: *json.Value = json.value_get(arr, i);
-        var c: doc.AnimationChannel;
-        c.sampler = get_index(e, "sampler");
-        c.target_node = doc.NONE;
-        c.target_path = doc.PATH_TRANSLATION;
-        val tgt: *json.Value = json.value_find(e, "target");
-        if (tgt != nil && json.value_is_object(tgt)) {
-            c.target_node = get_index(tgt, "node");
-            val tp: str = get_str(tgt, "path", alloc);
-            if (tp == nil) { ret err[slice.Slice[doc.AnimationChannel], str]("out of memory reading target path"); }
-            c.target_path = target_path(tp);
-        }
-        data[i] = c;
-        i = i + 1;
+fun parse_anim_sampler(c: *Cursor, e: *json.Value) doc.AnimationSampler {
+    var s: doc.AnimationSampler;
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret s;
     }
-    ret ok[slice.Slice[doc.AnimationChannel], str](slice.make[doc.AnimationChannel](data, n));
+    s.input  = need_usize(c, e, "input");
+    s.output = need_usize(c, e, "output");
+    var word: [16]u8;
+    s.interpolation = doc.Interpolation.linear{};
+    if (get_word(c, e, "interpolation", ?word[0])) { s.interpolation = interpolation(c, ?word[0]); }
+    ret s;
 }
 
-# read one animation
-fun parse_animation(e: *json.Value, alloc: *allo.Allocator) Result[doc.Animation, str] {
+fun parse_anim_channel(c: *Cursor, e: *json.Value) doc.AnimationChannel {
+    var ch: doc.AnimationChannel;
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret ch;
+    }
+    ch.sampler = need_usize(c, e, "sampler");
+    val tgt: opt[*json.Value] = need_object(c, e, "target");
+    if (sel tgt.none) { ret ch; }
+    ch.target_node = opt_usize(c, tgt.some, "node");
+    var word: [16]u8;
+    if (get_word(c, tgt.some, "path", ?word[0])) {
+        ch.target_path = target_path(c, ?word[0]);
+    }
+    or {
+        missing(c);
+    }
+    ret ch;
+}
+
+fun parse_animation(c: *Cursor, e: *json.Value) doc.Animation {
     var an: doc.Animation;
-    an.name = get_str(e, "name", alloc);
-    if (an.name == nil) { ret err[doc.Animation, str]("out of memory reading animation name"); }
-    val sr: Result[slice.Slice[doc.AnimationSampler], str] = parse_anim_samplers(e, alloc);
-    if (is_err[slice.Slice[doc.AnimationSampler], str](sr)) { ret err[doc.Animation, str](unwrap_err[slice.Slice[doc.AnimationSampler], str](sr)); }
-    an.samplers = unwrap_ok[slice.Slice[doc.AnimationSampler], str](sr);
-    val cr: Result[slice.Slice[doc.AnimationChannel], str] = parse_anim_channels(e, alloc);
-    if (is_err[slice.Slice[doc.AnimationChannel], str](cr)) { ret err[doc.Animation, str](unwrap_err[slice.Slice[doc.AnimationChannel], str](cr)); }
-    an.channels = unwrap_ok[slice.Slice[doc.AnimationChannel], str](cr);
-    ret ok[doc.Animation, str](an);
+    if (!json.value_is_object(e)) {
+        invalid(c);
+        ret an;
+    }
+    an.channels = need_list[doc.AnimationChannel](c, e, "channels", parse_anim_channel);
+    an.samplers = need_list[doc.AnimationSampler](c, e, "samplers", parse_anim_sampler);
+    an.name     = get_str(c, e, "name");
+    ret an;
 }
 
-# populate the buffer, buffer view, and accessor arrays
-fun fill_buffers(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Result[bool, str] {
-    val ba: *json.Value = json.value_find(root, "buffers");
-    if (ba != nil && json.value_is_array(ba)) {
-        val n: usize = json.value_count(ba);
-        if (n > 0) {
-            val r: Result[*doc.Buffer, str] = allo.allocate[doc.Buffer](alloc, n);
-            if (is_err[*doc.Buffer, str](r)) { ret err[bool, str](unwrap_err[*doc.Buffer, str](r)); }
-            val data: *doc.Buffer = unwrap_ok[*doc.Buffer, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Buffer, str] = parse_buffer(json.value_get(ba, i), alloc);
-                if (is_err[doc.Buffer, str](er)) { ret err[bool, str](unwrap_err[doc.Buffer, str](er)); }
-                data[i] = unwrap_ok[doc.Buffer, str](er);
-                i = i + 1;
-            }
-            d.buffers = slice.make[doc.Buffer](data, n);
-        }
-    }
-
-    val va: *json.Value = json.value_find(root, "bufferViews");
-    if (va != nil && json.value_is_array(va)) {
-        val n: usize = json.value_count(va);
-        if (n > 0) {
-            val r: Result[*doc.BufferView, str] = allo.allocate[doc.BufferView](alloc, n);
-            if (is_err[*doc.BufferView, str](r)) { ret err[bool, str](unwrap_err[*doc.BufferView, str](r)); }
-            val data: *doc.BufferView = unwrap_ok[*doc.BufferView, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.BufferView, str] = parse_buffer_view(json.value_get(va, i), alloc);
-                if (is_err[doc.BufferView, str](er)) { ret err[bool, str](unwrap_err[doc.BufferView, str](er)); }
-                data[i] = unwrap_ok[doc.BufferView, str](er);
-                i = i + 1;
-            }
-            d.buffer_views = slice.make[doc.BufferView](data, n);
-        }
-    }
-
-    val aa: *json.Value = json.value_find(root, "accessors");
-    if (aa != nil && json.value_is_array(aa)) {
-        val n: usize = json.value_count(aa);
-        if (n > 0) {
-            val r: Result[*doc.Accessor, str] = allo.allocate[doc.Accessor](alloc, n);
-            if (is_err[*doc.Accessor, str](r)) { ret err[bool, str](unwrap_err[*doc.Accessor, str](r)); }
-            val data: *doc.Accessor = unwrap_ok[*doc.Accessor, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Accessor, str] = parse_accessor(json.value_get(aa, i), alloc);
-                if (is_err[doc.Accessor, str](er)) { ret err[bool, str](unwrap_err[doc.Accessor, str](er)); }
-                data[i] = unwrap_ok[doc.Accessor, str](er);
-                i = i + 1;
-            }
-            d.accessors = slice.make[doc.Accessor](data, n);
-        }
-    }
-    ret ok[bool, str](true);
+fun at_buffer(i: usize) Site {
+    ret Site.buffer{i};
 }
 
-# populate the scene-graph, mesh, material, and animation arrays
-fun fill_arrays(root: *json.Value, d: *doc.Document, alloc: *allo.Allocator) Result[bool, str] {
-    val sa: *json.Value = json.value_find(root, "scenes");
-    if (sa != nil && json.value_is_array(sa)) {
-        val n: usize = json.value_count(sa);
-        if (n > 0) {
-            val r: Result[*doc.Scene, str] = allo.allocate[doc.Scene](alloc, n);
-            if (is_err[*doc.Scene, str](r)) { ret err[bool, str](unwrap_err[*doc.Scene, str](r)); }
-            val data: *doc.Scene = unwrap_ok[*doc.Scene, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Scene, str] = parse_scene(json.value_get(sa, i), alloc);
-                if (is_err[doc.Scene, str](er)) { ret err[bool, str](unwrap_err[doc.Scene, str](er)); }
-                data[i] = unwrap_ok[doc.Scene, str](er);
-                i = i + 1;
-            }
-            d.scenes = slice.make[doc.Scene](data, n);
-        }
-    }
+fun at_buffer_view(i: usize) Site {
+    ret Site.buffer_view{i};
+}
 
-    val na: *json.Value = json.value_find(root, "nodes");
-    if (na != nil && json.value_is_array(na)) {
-        val n: usize = json.value_count(na);
-        if (n > 0) {
-            val r: Result[*doc.Node, str] = allo.allocate[doc.Node](alloc, n);
-            if (is_err[*doc.Node, str](r)) { ret err[bool, str](unwrap_err[*doc.Node, str](r)); }
-            val data: *doc.Node = unwrap_ok[*doc.Node, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Node, str] = parse_node(json.value_get(na, i), alloc);
-                if (is_err[doc.Node, str](er)) { ret err[bool, str](unwrap_err[doc.Node, str](er)); }
-                data[i] = unwrap_ok[doc.Node, str](er);
-                i = i + 1;
-            }
-            d.nodes = slice.make[doc.Node](data, n);
-        }
-    }
+fun at_accessor(i: usize) Site {
+    ret Site.accessor{i};
+}
 
-    val ma: *json.Value = json.value_find(root, "meshes");
-    if (ma != nil && json.value_is_array(ma)) {
-        val n: usize = json.value_count(ma);
-        if (n > 0) {
-            val r: Result[*doc.Mesh, str] = allo.allocate[doc.Mesh](alloc, n);
-            if (is_err[*doc.Mesh, str](r)) { ret err[bool, str](unwrap_err[*doc.Mesh, str](r)); }
-            val data: *doc.Mesh = unwrap_ok[*doc.Mesh, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Mesh, str] = parse_mesh(json.value_get(ma, i), alloc);
-                if (is_err[doc.Mesh, str](er)) { ret err[bool, str](unwrap_err[doc.Mesh, str](er)); }
-                data[i] = unwrap_ok[doc.Mesh, str](er);
-                i = i + 1;
-            }
-            d.meshes = slice.make[doc.Mesh](data, n);
-        }
-    }
+fun at_mesh(i: usize) Site {
+    ret Site.mesh{i};
+}
 
-    val mta: *json.Value = json.value_find(root, "materials");
-    if (mta != nil && json.value_is_array(mta)) {
-        val n: usize = json.value_count(mta);
-        if (n > 0) {
-            val r: Result[*doc.Material, str] = allo.allocate[doc.Material](alloc, n);
-            if (is_err[*doc.Material, str](r)) { ret err[bool, str](unwrap_err[*doc.Material, str](r)); }
-            val data: *doc.Material = unwrap_ok[*doc.Material, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Material, str] = parse_material(json.value_get(mta, i), alloc);
-                if (is_err[doc.Material, str](er)) { ret err[bool, str](unwrap_err[doc.Material, str](er)); }
-                data[i] = unwrap_ok[doc.Material, str](er);
-                i = i + 1;
-            }
-            d.materials = slice.make[doc.Material](data, n);
-        }
-    }
+fun at_node(i: usize) Site {
+    ret Site.node{i};
+}
 
-    val ta: *json.Value = json.value_find(root, "textures");
-    if (ta != nil && json.value_is_array(ta)) {
-        val n: usize = json.value_count(ta);
-        if (n > 0) {
-            val r: Result[*doc.Texture, str] = allo.allocate[doc.Texture](alloc, n);
-            if (is_err[*doc.Texture, str](r)) { ret err[bool, str](unwrap_err[*doc.Texture, str](r)); }
-            val data: *doc.Texture = unwrap_ok[*doc.Texture, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Texture, str] = parse_texture(json.value_get(ta, i), alloc);
-                if (is_err[doc.Texture, str](er)) { ret err[bool, str](unwrap_err[doc.Texture, str](er)); }
-                data[i] = unwrap_ok[doc.Texture, str](er);
-                i = i + 1;
-            }
-            d.textures = slice.make[doc.Texture](data, n);
-        }
-    }
+fun at_scene(i: usize) Site {
+    ret Site.scene{i};
+}
 
-    val ia: *json.Value = json.value_find(root, "images");
-    if (ia != nil && json.value_is_array(ia)) {
-        val n: usize = json.value_count(ia);
-        if (n > 0) {
-            val r: Result[*doc.Image, str] = allo.allocate[doc.Image](alloc, n);
-            if (is_err[*doc.Image, str](r)) { ret err[bool, str](unwrap_err[*doc.Image, str](r)); }
-            val data: *doc.Image = unwrap_ok[*doc.Image, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Image, str] = parse_image(json.value_get(ia, i), alloc);
-                if (is_err[doc.Image, str](er)) { ret err[bool, str](unwrap_err[doc.Image, str](er)); }
-                data[i] = unwrap_ok[doc.Image, str](er);
-                i = i + 1;
-            }
-            d.images = slice.make[doc.Image](data, n);
-        }
-    }
+fun at_material(i: usize) Site {
+    ret Site.material{i};
+}
 
-    val spa: *json.Value = json.value_find(root, "samplers");
-    if (spa != nil && json.value_is_array(spa)) {
-        val n: usize = json.value_count(spa);
-        if (n > 0) {
-            val r: Result[*doc.Sampler, str] = allo.allocate[doc.Sampler](alloc, n);
-            if (is_err[*doc.Sampler, str](r)) { ret err[bool, str](unwrap_err[*doc.Sampler, str](r)); }
-            val data: *doc.Sampler = unwrap_ok[*doc.Sampler, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Sampler, str] = parse_sampler(json.value_get(spa, i), alloc);
-                if (is_err[doc.Sampler, str](er)) { ret err[bool, str](unwrap_err[doc.Sampler, str](er)); }
-                data[i] = unwrap_ok[doc.Sampler, str](er);
-                i = i + 1;
-            }
-            d.samplers = slice.make[doc.Sampler](data, n);
-        }
-    }
+fun at_texture(i: usize) Site {
+    ret Site.texture{i};
+}
 
-    val ka: *json.Value = json.value_find(root, "skins");
-    if (ka != nil && json.value_is_array(ka)) {
-        val n: usize = json.value_count(ka);
-        if (n > 0) {
-            val r: Result[*doc.Skin, str] = allo.allocate[doc.Skin](alloc, n);
-            if (is_err[*doc.Skin, str](r)) { ret err[bool, str](unwrap_err[*doc.Skin, str](r)); }
-            val data: *doc.Skin = unwrap_ok[*doc.Skin, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Skin, str] = parse_skin(json.value_get(ka, i), alloc);
-                if (is_err[doc.Skin, str](er)) { ret err[bool, str](unwrap_err[doc.Skin, str](er)); }
-                data[i] = unwrap_ok[doc.Skin, str](er);
-                i = i + 1;
-            }
-            d.skins = slice.make[doc.Skin](data, n);
-        }
-    }
+fun at_image(i: usize) Site {
+    ret Site.image{i};
+}
 
-    val ana: *json.Value = json.value_find(root, "animations");
-    if (ana != nil && json.value_is_array(ana)) {
-        val n: usize = json.value_count(ana);
-        if (n > 0) {
-            val r: Result[*doc.Animation, str] = allo.allocate[doc.Animation](alloc, n);
-            if (is_err[*doc.Animation, str](r)) { ret err[bool, str](unwrap_err[*doc.Animation, str](r)); }
-            val data: *doc.Animation = unwrap_ok[*doc.Animation, str](r);
-            var i: usize = 0;
-            for (i < n) {
-                val er: Result[doc.Animation, str] = parse_animation(json.value_get(ana, i), alloc);
-                if (is_err[doc.Animation, str](er)) { ret err[bool, str](unwrap_err[doc.Animation, str](er)); }
-                data[i] = unwrap_ok[doc.Animation, str](er);
-                i = i + 1;
-            }
-            d.animations = slice.make[doc.Animation](data, n);
-        }
+fun at_sampler(i: usize) Site {
+    ret Site.sampler{i};
+}
+
+fun at_skin(i: usize) Site {
+    ret Site.skin{i};
+}
+
+fun at_animation(i: usize) Site {
+    ret Site.animation{i};
+}
+
+# read a top-level collection, each element under its own site
+# ---
+# root:  the document root object
+# key:   the collection's member name
+# alloc: allocator for the slice and everything its elements own
+# site:  locates the element at an index
+# parse: reads one element
+# ret:   the elements, empty when the member is absent, or the first defect
+fun section[T](root: *json.Value, key: str, alloc: *allo.Allocator, site: fun(usize) Site, parse: fun(*Cursor, *json.Value) T) res[slice.Slice[T], DocumentError] {
+    val m: opt[*json.Value] = json.value_find(root, key);
+    if (sel m.none) { ret res[slice.Slice[T], DocumentError].ok{slice.make[T](nil, 0)}; }
+    val arr: *json.Value = m.some;
+    if (!json.value_is_array(arr)) { ret res[slice.Slice[T], DocumentError].err{DocumentError.invalid{Site.root{}}}; }
+
+    val n: usize = json.value_count(arr);
+    if (n == 0) { ret res[slice.Slice[T], DocumentError].ok{slice.make[T](nil, 0)}; }
+    val ar: res[*T, allo.Error] = allo.allocate[T](alloc, n);
+    if (sel ar.err) { ret res[slice.Slice[T], DocumentError].err{DocumentError.alloc{ar.err}}; }
+    val data: *T = ar.ok;
+
+    var i: usize = 0;
+    for (i < n) {
+        val e: opt[*json.Value] = json.value_get(arr, i);
+        if (sel e.none) { brk; }
+        var c: Cursor;
+        c.alloc = alloc;
+        c.site  = site(i);
+        val v: T = parse(?c, e.some);
+        if (sel c.fault.some) { ret res[slice.Slice[T], DocumentError].err{c.fault.some}; }
+        data[i] = v;
+        i       = i + 1;
     }
-    ret ok[bool, str](true);
+    ret res[slice.Slice[T], DocumentError].ok{slice.make[T](data, i)};
+}
+
+# whether a glTF version string names major version 2
+fun major_two(v: str) bool {
+    ret str_starts_with(v, "2.");
+}
+
+# read the required top-level asset metadata
+fun parse_asset(root: *json.Value, alloc: *allo.Allocator) res[doc.Asset, DocumentError] {
+    var c: Cursor;
+    c.alloc = alloc;
+    c.site  = Site.asset{};
+
+    var a: doc.Asset;
+    val m: opt[*json.Value] = need_object(?c, root, "asset");
+    if (sel m.some) {
+        a.version     = need_str(?c, m.some, "version");
+        a.min_version = get_str(?c, m.some, "minVersion");
+        a.generator   = get_str(?c, m.some, "generator");
+        a.copyright   = get_str(?c, m.some, "copyright");
+    }
+    if (sel c.fault.some) { ret res[doc.Asset, DocumentError].err{c.fault.some}; }
+
+    if (!major_two(a.version)) { ret res[doc.Asset, DocumentError].err{DocumentError.version{}}; }
+    # this loader implements 2.0, so a document needing a later minor refuses too
+    if (!str_equals(a.min_version, "") && !str_equals(a.min_version, "2.0")) {
+        ret res[doc.Asset, DocumentError].err{DocumentError.version{}};
+    }
+    ret res[doc.Asset, DocumentError].ok{a};
 }
 
 # parse a glTF JSON document into a Document
 #
-# json_bytes and the allocator must outlive the returned document: strings are
-# borrowed from json_bytes and all arrays are allocated from alloc.
+# the JSON value tree and every string and array of the document are allocated
+# from alloc; nothing in the result borrows json_bytes.
 # ---
 # json_bytes: the glTF JSON text
 # len:        length of json_bytes in bytes
-# alloc:      allocator for the document's arrays and the JSON value tree
-# ret:        the parsed document, or an error
-pub fun parse_document(json_bytes: *u8, len: usize, alloc: *allo.Allocator) Result[doc.Document, str] {
-    val jr: Result[json.Value, str] = json.parse(json_bytes, len, alloc);
-    if (is_err[json.Value, str](jr)) { ret err[doc.Document, str](unwrap_err[json.Value, str](jr)); }
-    var root: json.Value = unwrap_ok[json.Value, str](jr);
-    if (!json.value_is_object(?root)) { ret err[doc.Document, str]("glTF root is not an object"); }
+# alloc:      allocator for the document and the JSON value tree
+# ret:        the parsed document, or the first defect found
+pub fun parse_document(json_bytes: *u8, len: usize, alloc: *allo.Allocator) res[doc.Document, DocumentError] {
+    val jr: res[json.Value, json.JsonError] = json.parse(json_bytes, len, alloc);
+    if (sel jr.err) { ret res[doc.Document, DocumentError].err{DocumentError.json{jr.err}}; }
+    var root: json.Value = jr.ok;
+    if (!json.value_is_object(?root)) { ret res[doc.Document, DocumentError].err{DocumentError.invalid{Site.root{}}}; }
 
-    var d: doc.Document;
-    val asr: Result[doc.Asset, str] = parse_asset(?root, alloc);
-    if (is_err[doc.Asset, str](asr)) { ret err[doc.Document, str](unwrap_err[doc.Asset, str](asr)); }
-    d.asset = unwrap_ok[doc.Asset, str](asr);
-    d.scene = get_index(?root, "scene");
+    var d:   doc.Document;
+    val asr: res[doc.Asset, DocumentError] = parse_asset(?root, alloc);
+    if (sel asr.err) { ret res[doc.Document, DocumentError].err{asr.err}; }
+    d.asset = asr.ok;
 
-    val br: Result[bool, str] = fill_buffers(?root, ?d, alloc);
-    if (is_err[bool, str](br)) { ret err[doc.Document, str](unwrap_err[bool, str](br)); }
-    val ar: Result[bool, str] = fill_arrays(?root, ?d, alloc);
-    if (is_err[bool, str](ar)) { ret err[doc.Document, str](unwrap_err[bool, str](ar)); }
-    ret ok[doc.Document, str](d);
+    var rc: Cursor;
+    rc.alloc = alloc;
+    rc.site  = Site.root{};
+    d.scene  = opt_usize(?rc, ?root, "scene");
+    if (sel rc.fault.some) { ret res[doc.Document, DocumentError].err{rc.fault.some}; }
+
+    val buffers: res[slice.Slice[doc.Buffer], DocumentError] = section[doc.Buffer](?root, "buffers", alloc, at_buffer, parse_buffer);
+    if (sel buffers.err) { ret res[doc.Document, DocumentError].err{buffers.err}; }
+    d.buffers = buffers.ok;
+
+    val views: res[slice.Slice[doc.BufferView], DocumentError] = section[doc.BufferView](?root, "bufferViews", alloc, at_buffer_view, parse_buffer_view);
+    if (sel views.err) { ret res[doc.Document, DocumentError].err{views.err}; }
+    d.buffer_views = views.ok;
+
+    val accessors: res[slice.Slice[doc.Accessor], DocumentError] = section[doc.Accessor](?root, "accessors", alloc, at_accessor, parse_accessor);
+    if (sel accessors.err) { ret res[doc.Document, DocumentError].err{accessors.err}; }
+    d.accessors = accessors.ok;
+
+    val meshes: res[slice.Slice[doc.Mesh], DocumentError] = section[doc.Mesh](?root, "meshes", alloc, at_mesh, parse_mesh);
+    if (sel meshes.err) { ret res[doc.Document, DocumentError].err{meshes.err}; }
+    d.meshes = meshes.ok;
+
+    val nodes: res[slice.Slice[doc.Node], DocumentError] = section[doc.Node](?root, "nodes", alloc, at_node, parse_node);
+    if (sel nodes.err) { ret res[doc.Document, DocumentError].err{nodes.err}; }
+    d.nodes = nodes.ok;
+
+    val scenes: res[slice.Slice[doc.Scene], DocumentError] = section[doc.Scene](?root, "scenes", alloc, at_scene, parse_scene);
+    if (sel scenes.err) { ret res[doc.Document, DocumentError].err{scenes.err}; }
+    d.scenes = scenes.ok;
+
+    val materials: res[slice.Slice[doc.Material], DocumentError] = section[doc.Material](?root, "materials", alloc, at_material, parse_material);
+    if (sel materials.err) { ret res[doc.Document, DocumentError].err{materials.err}; }
+    d.materials = materials.ok;
+
+    val textures: res[slice.Slice[doc.Texture], DocumentError] = section[doc.Texture](?root, "textures", alloc, at_texture, parse_texture);
+    if (sel textures.err) { ret res[doc.Document, DocumentError].err{textures.err}; }
+    d.textures = textures.ok;
+
+    val images: res[slice.Slice[doc.Image], DocumentError] = section[doc.Image](?root, "images", alloc, at_image, parse_image);
+    if (sel images.err) { ret res[doc.Document, DocumentError].err{images.err}; }
+    d.images = images.ok;
+
+    val samplers: res[slice.Slice[doc.Sampler], DocumentError] = section[doc.Sampler](?root, "samplers", alloc, at_sampler, parse_sampler);
+    if (sel samplers.err) { ret res[doc.Document, DocumentError].err{samplers.err}; }
+    d.samplers = samplers.ok;
+
+    val skins: res[slice.Slice[doc.Skin], DocumentError] = section[doc.Skin](?root, "skins", alloc, at_skin, parse_skin);
+    if (sel skins.err) { ret res[doc.Document, DocumentError].err{skins.err}; }
+    d.skins = skins.ok;
+
+    val animations: res[slice.Slice[doc.Animation], DocumentError] = section[doc.Animation](?root, "animations", alloc, at_animation, parse_animation);
+    if (sel animations.err) { ret res[doc.Document, DocumentError].err{animations.err}; }
+    d.animations = animations.ok;
+
+    ret res[doc.Document, DocumentError].ok{d};
 }
 
 # parse a .glb container into a document plus its BIN buffer
@@ -868,20 +1026,26 @@ pub fun parse_document(json_bytes: *u8, len: usize, alloc: *allo.Allocator) Resu
 # data:  the .glb bytes
 # len:   length of data in bytes
 # alloc: allocator for the document
-# ret:   the document and BIN span, or an error
-pub fun load_glb(data: *u8, len: usize, alloc: *allo.Allocator) Result[Loaded, str] {
-    val gr: Result[glb.Glb, str] = glb.parse_glb(data, len);
-    if (is_err[glb.Glb, str](gr)) { ret err[Loaded, str](unwrap_err[glb.Glb, str](gr)); }
-    val g: glb.Glb = unwrap_ok[glb.Glb, str](gr);
+# ret:   the document and BIN span, or the container's or document's defect
+pub fun load_glb(data: *u8, len: usize, alloc: *allo.Allocator) res[Loaded, LoadError] {
+    val gr: res[glb.Glb, glb.ContainerError] = glb.parse_glb(data, len);
+    if (sel gr.err) { ret res[Loaded, LoadError].err{LoadError.container{gr.err}}; }
+    val g: glb.Glb = gr.ok;
 
-    val dr: Result[doc.Document, str] = parse_document(g.json, g.json_len, alloc);
-    if (is_err[doc.Document, str](dr)) { ret err[Loaded, str](unwrap_err[doc.Document, str](dr)); }
+    val dr: res[doc.Document, DocumentError] = parse_document(g.json, g.json_len, alloc);
+    if (sel dr.err) { ret res[Loaded, LoadError].err{LoadError.document{dr.err}}; }
 
     var out: Loaded;
-    out.document = unwrap_ok[doc.Document, str](dr);
-    out.bin = g.bin;
-    out.bin_len = g.bin_len;
-    ret ok[Loaded, str](out);
+    out.document = dr.ok;
+    out.bin      = g.bin;
+    out.bin_len  = g.bin_len;
+    ret res[Loaded, LoadError].ok{out};
+}
+
+# whether an optional index holds exactly v
+fun is_index(o: opt[usize], v: usize) bool {
+    if (sel o.some) { ret o.some == v; }
+    ret false;
 }
 
 # copy a null-terminated string into out at off, returning the new offset
@@ -889,7 +1053,7 @@ fun append_cstr(out: *u8, off: usize, s: str) usize {
     var i: usize = 0;
     for (s[i] != 0) {
         out[off + i] = s[i];
-        i = i + 1;
+        i            = i + 1;
     }
     ret off + i;
 }
@@ -899,11 +1063,11 @@ fun append_cstr(out: *u8, off: usize, s: str) usize {
 # the JSON chunk is space-padded and the BIN chunk zero-padded to 4-byte
 # alignment, matching the container specification.
 fun assemble_glb(out: *u8, json: *u8, json_len: usize, bin: *u8, bin_len: usize) usize {
-    val jpad: usize = (4 - (json_len % 4)) % 4;
+    val jpad:   usize = (4 - (json_len % 4)) % 4;
     val jchunk: usize = json_len + jpad;
-    val bpad: usize = (4 - (bin_len % 4)) % 4;
+    val bpad:   usize = (4 - (bin_len % 4)) % 4;
     val bchunk: usize = bin_len + bpad;
-    val total: usize = 12 + 8 + jchunk + 8 + bchunk;
+    val total:  usize = 12 + 8 + jchunk + 8 + bchunk;
 
     bytes.write_u32(out, 0, glb.MAGIC);
     bytes.write_u32(out, 4, glb.VERSION);
@@ -912,17 +1076,29 @@ fun assemble_glb(out: *u8, json: *u8, json_len: usize, bin: *u8, bin_len: usize)
     bytes.write_u32(out, 12, jchunk::u32);
     bytes.write_u32(out, 16, glb.CHUNK_JSON);
     var i: usize = 0;
-    for (i < json_len) { out[20 + i] = json[i]; i = i + 1; }
+    for (i < json_len) {
+        out[20 + i] = json[i];
+        i           = i + 1;
+    }
     var p: usize = 0;
-    for (p < jpad) { out[20 + json_len + p] = ' '; p = p + 1; }
+    for (p < jpad) {
+        out[20 + json_len + p] = ' ';
+        p                      = p + 1;
+    }
 
     val boff: usize = 20 + jchunk;
     bytes.write_u32(out, boff, bchunk::u32);
     bytes.write_u32(out, boff + 4, glb.CHUNK_BIN);
     i = 0;
-    for (i < bin_len) { out[boff + 8 + i] = bin[i]; i = i + 1; }
+    for (i < bin_len) {
+        out[boff + 8 + i] = bin[i];
+        i                 = i + 1;
+    }
     p = 0;
-    for (p < bpad) { out[boff + 8 + bin_len + p] = 0; p = p + 1; }
+    for (p < bpad) {
+        out[boff + 8 + bin_len + p] = 0;
+        p                           = p + 1;
+    }
     ret total;
 }
 
@@ -970,58 +1146,58 @@ test "parse: document structure from a synthetic .glb, including float fields" {
     var binsrc: [42]u8;
     fixture_bin(?binsrc[0]);
     var jbuf: [1024]u8;
-    val jl: usize = fixture_json(?jbuf[0]);
-    var buf: [2048]u8;
-    val n: usize = assemble_glb(?buf[0], ?jbuf[0], jl, ?binsrc[0], 42);
+    val jl:   usize = fixture_json(?jbuf[0]);
+    var buf:  [2048]u8;
+    val n:    usize = assemble_glb(?buf[0], ?jbuf[0], jl, ?binsrc[0], 42);
 
-    val lr: Result[Loaded, str] = load_glb(?buf[0], n, ?a);
-    if (is_err[Loaded, str](lr)) { ret 1; }
-    val ld: Loaded = unwrap_ok[Loaded, str](lr);
-    val d: doc.Document = ld.document;
+    val lr: res[Loaded, LoadError] = load_glb(?buf[0], n, ?a);
+    if (sel lr.err) { ret 1; }
+    val ld: Loaded       = lr.ok;
+    val d:  doc.Document = ld.document;
 
-    if (!str_equals(d.asset.version, "2.0")) { ret 1; }
-    if (d.scene != 0) { ret 1; }
-    if (d.scenes.size != 1 || d.nodes.size != 2) { ret 1; }
+    if (!str_equals(d.asset.version, "2.0"))                                     { ret 1; }
+    if (!is_index(d.scene, 0))                                                   { ret 1; }
+    if (d.scenes.size != 1 || d.nodes.size != 2)                                 { ret 1; }
     if (d.scenes.data[0].nodes.size != 1 || d.scenes.data[0].nodes.data[0] != 0) { ret 1; }
 
     val n0: *doc.Node = ?d.nodes.data[0];
-    if (n0.mesh != 0) { ret 1; }
-    if (n0.children.size != 1 || n0.children.data[0] != 1) { ret 1; }
-    if (n0.has_matrix) { ret 1; }
+    if (!is_index(n0.mesh, 0))                                                                       { ret 1; }
+    if (n0.children.size != 1 || n0.children.data[0] != 1)                                           { ret 1; }
+    if (n0.has_matrix)                                                                               { ret 1; }
     if (n0.translation[0] != 1.5f32 || n0.translation[1] != -2.0f32 || n0.translation[2] != 3.25f32) { ret 1; }
-    if (n0.scale[0] != 2.0f32 || n0.scale[1] != 2.0f32 || n0.scale[2] != 2.0f32) { ret 1; }
-    if (n0.rotation[3] != 1.0f32) { ret 1; }
-    if (d.nodes.data[1].rotation[3] != 1.0f32) { ret 1; }
+    if (n0.scale[0] != 2.0f32 || n0.scale[1] != 2.0f32 || n0.scale[2] != 2.0f32)                     { ret 1; }
+    if (n0.rotation[3] != 1.0f32)                                                                    { ret 1; }
+    if (d.nodes.data[1].rotation[3] != 1.0f32)                                                       { ret 1; }
 
     if (d.meshes.size != 1) { ret 1; }
     val prim: *doc.Primitive = ?d.meshes.data[0].primitives.data[0];
-    if (prim.attributes.size != 1) { ret 1; }
-    if (!str_equals(prim.attributes.data[0].name, "POSITION")) { ret 1; }
-    if (prim.attributes.data[0].accessor != 0) { ret 1; }
-    if (prim.indices != 1 || prim.material != 0) { ret 1; }
-    if (prim.mode != doc.MODE_TRIANGLES) { ret 1; }
+    if (prim.attributes.size != 1)                                 { ret 1; }
+    if (!str_equals(prim.attributes.data[0].name, "POSITION"))     { ret 1; }
+    if (prim.attributes.data[0].accessor != 0)                     { ret 1; }
+    if (!is_index(prim.indices, 1) || !is_index(prim.material, 0)) { ret 1; }
+    if (!sel prim.mode.triangles)                                  { ret 1; }
 
     if (d.accessors.size != 2) { ret 1; }
     val ac0: *doc.Accessor = ?d.accessors.data[0];
-    if (ac0.component_type != doc.COMPONENT_FLOAT || ac0.count != 3) { ret 1; }
-    if (ac0.element_type != doc.TYPE_VEC3) { ret 1; }
-    if (!ac0.has_min || !ac0.has_max || ac0.bounds_len != 3) { ret 1; }
-    if (ac0.min[0] != 1.0f32 || ac0.min[2] != 3.0f32) { ret 1; }
-    if (ac0.max[0] != 7.0f32 || ac0.max[2] != 9.0f32) { ret 1; }
-    if (d.accessors.data[1].component_type != doc.COMPONENT_UNSIGNED_SHORT) { ret 1; }
+    if (!sel ac0.component_type.float || ac0.count != 3)        { ret 1; }
+    if (!sel ac0.element_type.vec3)                             { ret 1; }
+    if (!ac0.has_min || !ac0.has_max || ac0.bounds_len != 3)    { ret 1; }
+    if (ac0.min[0] != 1.0f32 || ac0.min[2] != 3.0f32)           { ret 1; }
+    if (ac0.max[0] != 7.0f32 || ac0.max[2] != 9.0f32)           { ret 1; }
+    if (!sel d.accessors.data[1].component_type.unsigned_short) { ret 1; }
 
-    if (d.buffer_views.size != 2) { ret 1; }
-    if (d.buffer_views.data[0].byte_length != 36) { ret 1; }
-    if (d.buffer_views.data[1].byte_offset != 36) { ret 1; }
+    if (d.buffer_views.size != 2)                                   { ret 1; }
+    if (d.buffer_views.data[0].byte_length != 36)                   { ret 1; }
+    if (d.buffer_views.data[1].byte_offset != 36)                   { ret 1; }
     if (d.buffers.size != 1 || d.buffers.data[0].byte_length != 42) { ret 1; }
 
     if (d.materials.size != 1) { ret 1; }
     val mt: *doc.Material = ?d.materials.data[0];
     if (mt.pbr.base_color_factor[1] != 0.5f32 || mt.pbr.base_color_factor[2] != 0.25f32) { ret 1; }
-    if (mt.pbr.metallic_factor != 0.0f32 || mt.pbr.roughness_factor != 0.5f32) { ret 1; }
-    if (mt.emissive_factor[0] != 0.5f32 || mt.emissive_factor[2] != 0.125f32) { ret 1; }
-    if (mt.alpha_mode != doc.ALPHA_MASK || mt.alpha_cutoff != 0.25f32) { ret 1; }
-    if (!mt.double_sided) { ret 1; }
+    if (mt.pbr.metallic_factor != 0.0f32 || mt.pbr.roughness_factor != 0.5f32)           { ret 1; }
+    if (mt.emissive_factor[0] != 0.5f32 || mt.emissive_factor[2] != 0.125f32)            { ret 1; }
+    if (!sel mt.alpha_mode.mask || mt.alpha_cutoff != 0.25f32)                           { ret 1; }
+    if (!mt.double_sided)                                                                { ret 1; }
     ret 0;
 }
 
@@ -1032,35 +1208,35 @@ test "parse: accessor reads over the BIN chunk return exact values" {
     var binsrc: [42]u8;
     fixture_bin(?binsrc[0]);
     var jbuf: [1024]u8;
-    val jl: usize = fixture_json(?jbuf[0]);
-    var buf: [2048]u8;
-    val n: usize = assemble_glb(?buf[0], ?jbuf[0], jl, ?binsrc[0], 42);
+    val jl:   usize = fixture_json(?jbuf[0]);
+    var buf:  [2048]u8;
+    val n:    usize = assemble_glb(?buf[0], ?jbuf[0], jl, ?binsrc[0], 42);
 
-    val lr: Result[Loaded, str] = load_glb(?buf[0], n, ?a);
-    if (is_err[Loaded, str](lr)) { ret 1; }
-    var ld: Loaded = unwrap_ok[Loaded, str](lr);
+    val lr: res[Loaded, LoadError] = load_glb(?buf[0], n, ?a);
+    if (sel lr.err) { ret 1; }
+    var ld: Loaded = lr.ok;
 
-    val pr: Result[accessor.Plan, str] = accessor.plan(?ld.document, ld.bin, ld.bin_len, 0);
-    if (is_err[accessor.Plan, str](pr)) { ret 1; }
-    var pos_plan: accessor.Plan = unwrap_ok[accessor.Plan, str](pr);
+    val pr: res[accessor.Plan, accessor.PlanError] = accessor.plan(?ld.document, ld.bin, ld.bin_len, 0);
+    if (sel pr.err) { ret 1; }
+    var pos_plan: accessor.Plan = pr.ok;
 
     var pos: [9]f32;
-    val fr: Result[usize, str] = accessor.read_f32(?pos_plan, ?pos[0], 9);
-    if (is_err[usize, str](fr)) { ret 1; }
-    if (unwrap_ok[usize, str](fr) != 9) { ret 1; }
+    val fr:  res[usize, accessor.ReadError] = accessor.read_f32(?pos_plan, ?pos[0], 9);
+    if (sel fr.err) { ret 1; }
+    if (fr.ok != 9) { ret 1; }
     var k: usize = 0;
     for (k < 9) {
         if (pos[k] != (k + 1)::f32) { ret 1; }
         k = k + 1;
     }
 
-    val ir: Result[accessor.Plan, str] = accessor.plan(?ld.document, ld.bin, ld.bin_len, 1);
-    if (is_err[accessor.Plan, str](ir)) { ret 1; }
-    var idx_plan: accessor.Plan = unwrap_ok[accessor.Plan, str](ir);
+    val ir: res[accessor.Plan, accessor.PlanError] = accessor.plan(?ld.document, ld.bin, ld.bin_len, 1);
+    if (sel ir.err) { ret 1; }
+    var idx_plan: accessor.Plan = ir.ok;
 
     var idx: [3]u16;
-    val ur: Result[usize, str] = accessor.read_u16(?idx_plan, ?idx[0], 3);
-    if (is_err[usize, str](ur)) { ret 1; }
+    val ur:  res[usize, accessor.ReadError] = accessor.read_u16(?idx_plan, ?idx[0], 3);
+    if (sel ur.err)                                { ret 1; }
     if (idx[0] != 0 || idx[1] != 1 || idx[2] != 2) { ret 1; }
     ret 0;
 }
@@ -1068,8 +1244,11 @@ test "parse: accessor reads over the BIN chunk return exact values" {
 test "parse: parse_document rejects a non-object root" {
     var a: allo.Allocator;
     page.make(?a);
-    val src: str = "[1,2,3]";
-    if (!is_err[doc.Document, str](parse_document(src::*u8, 7, ?a))) { ret 1; }
+    val src: str                              = "[1,2,3]";
+    val r:   res[doc.Document, DocumentError] = parse_document(src, 7, ?a);
+    if (sel r.ok)                { ret 1; }
+    if (!sel r.err.invalid)      { ret 1; }
+    if (!sel r.err.invalid.root) { ret 1; }
     ret 0;
 }
 
@@ -1082,23 +1261,157 @@ test "parse: the document outlives the JSON buffer it was parsed from" {
     page.make(?a);
 
     var jbuf: [1024]u8;
-    val jl: usize = fixture_json(?jbuf[0]);
+    val jl:   usize = fixture_json(?jbuf[0]);
 
-    val dr: Result[doc.Document, str] = parse_document(?jbuf[0], jl, ?a);
-    if (is_err[doc.Document, str](dr)) { ret 1; }
-    val d: doc.Document = unwrap_ok[doc.Document, str](dr);
+    val dr: res[doc.Document, DocumentError] = parse_document(?jbuf[0], jl, ?a);
+    if (sel dr.err) { ret 1; }
+    val d: doc.Document = dr.ok;
 
     # destroy the source. every byte, not just the terminators.
     var i: usize = 0;
     for (i < 1024) {
         jbuf[i] = 0xAA;
-        i = i + 1;
+        i       = i + 1;
     }
 
-    if (!str_equals(d.asset.version, "2.0")) { ret 1; }
+    if (!str_equals(d.asset.version, "2.0"))              { ret 1; }
     if (!str_equals(d.asset.generator, "mach-gltf-test")) { ret 1; }
     # an absent member is an owned empty string, never nil, so this is safe to
     # compare rather than needing a nil guard first
     if (!str_equals(d.asset.copyright, "")) { ret 1; }
+    ret 0;
+}
+
+# parse a whole null-terminated JSON text
+fun parse_text(src: str, a: *allo.Allocator) res[doc.Document, DocumentError] {
+    ret parse_document(src, str_len(src), a);
+}
+
+test "parse: a required member that is absent is missing at its element" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"accessors\":[{\"componentType\":5126,\"count\":1,\"type\":\"SCALAR\"},{\"componentType\":5126,\"type\":\"VEC3\"}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
+    if (sel r.ok)                    { ret 1; }
+    if (!sel r.err.missing)          { ret 1; }
+    if (!sel r.err.missing.accessor) { ret 1; }
+    if (r.err.missing.accessor != 1) { ret 1; }
+    ret 0;
+}
+
+test "parse: a code outside its enumeration is invalid" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"materials\":[{},{\"alphaMode\":\"SHINY\"}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
+    if (sel r.ok)                    { ret 1; }
+    if (!sel r.err.invalid)          { ret 1; }
+    if (!sel r.err.invalid.material) { ret 1; }
+    if (r.err.invalid.material != 1) { ret 1; }
+    ret 0;
+}
+
+test "parse: a negative index is invalid" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"nodes\":[{\"mesh\":-1}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
+    if (sel r.ok)                { ret 1; }
+    if (!sel r.err.invalid)      { ret 1; }
+    if (!sel r.err.invalid.node) { ret 1; }
+    if (r.err.invalid.node != 0) { ret 1; }
+    ret 0;
+}
+
+test "parse: absent optional members read none and take spec defaults" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"nodes\":[{}],\"samplers\":[{\"magFilter\":9729}],\"animations\":[{\"samplers\":[{\"input\":0,\"output\":1}],\"channels\":[{\"sampler\":0,\"target\":{\"path\":\"weights\"}}]}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
+    if (sel r.err) { ret 1; }
+    val d: doc.Document = r.ok;
+    if (sel d.scene.some) { ret 1; }
+
+    val nd: *doc.Node = ?d.nodes.data[0];
+    if (sel nd.mesh.some || sel nd.skin.some || sel nd.camera.some)         { ret 1; }
+    if (nd.has_matrix || nd.rotation[3] != 1.0f32 || nd.scale[0] != 1.0f32) { ret 1; }
+
+    val sm: *doc.Sampler = ?d.samplers.data[0];
+    if (!sel sm.mag_filter.some)                        { ret 1; }
+    if (!sel sm.mag_filter.some.linear)                 { ret 1; }
+    if (sel sm.min_filter.some)                         { ret 1; }
+    if (!sel sm.wrap_s.repeat || !sel sm.wrap_t.repeat) { ret 1; }
+
+    val an: *doc.Animation = ?d.animations.data[0];
+    if (!sel an.samplers.data[0].interpolation.linear) { ret 1; }
+    val ch: *doc.AnimationChannel = ?an.channels.data[0];
+    if (sel ch.target_node.some)     { ret 1; }
+    if (!sel ch.target_path.weights) { ret 1; }
+    ret 0;
+}
+
+test "parse: string members are decoded, not copied raw" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val src: str                              = "{\"asset\":{\"version\":\"2.0\"},\"images\":[{\"uri\":\"tex\\/a\\u0062.png\",\"name\":\"q\\\"t\"}]}";
+    val r:   res[doc.Document, DocumentError] = parse_text(src, ?a);
+    if (sel r.err) { ret 1; }
+    val d: doc.Document = r.ok;
+    if (!str_equals(d.images.data[0].uri, "tex/ab.png")) { ret 1; }
+    if (!str_equals(d.images.data[0].name, "q\"t"))      { ret 1; }
+    if (sel d.images.data[0].buffer_view.some)           { ret 1; }
+    ret 0;
+}
+
+test "parse: a document for another major version is refused" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val r: res[doc.Document, DocumentError] = parse_text("{\"asset\":{\"version\":\"1.0\"}}", ?a);
+    if (sel r.ok)           { ret 1; }
+    if (!sel r.err.version) { ret 1; }
+
+    val later: res[doc.Document, DocumentError] = parse_text("{\"asset\":{\"version\":\"2.0\",\"minVersion\":\"2.1\"}}", ?a);
+    if (sel later.ok)           { ret 1; }
+    if (!sel later.err.version) { ret 1; }
+
+    val absent: res[doc.Document, DocumentError] = parse_text("{\"scenes\":[]}", ?a);
+    if (sel absent.ok)                 { ret 1; }
+    if (!sel absent.err.missing)       { ret 1; }
+    if (!sel absent.err.missing.asset) { ret 1; }
+    ret 0;
+}
+
+test "parse: malformed JSON and a non-array collection are told apart" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val bad: res[doc.Document, DocumentError] = parse_text("{\"asset\":", ?a);
+    if (sel bad.ok)        { ret 1; }
+    if (!sel bad.err.json) { ret 1; }
+
+    val shape: res[doc.Document, DocumentError] = parse_text("{\"asset\":{\"version\":\"2.0\"},\"nodes\":{}}", ?a);
+    if (sel shape.ok)                { ret 1; }
+    if (!sel shape.err.invalid)      { ret 1; }
+    if (!sel shape.err.invalid.root) { ret 1; }
+    ret 0;
+}
+
+test "parse: load_glb keeps container and document failures apart" {
+    var a: allo.Allocator;
+    page.make(?a);
+
+    var short: [4]u8;
+    val cr:    res[Loaded, LoadError] = load_glb(?short[0], 4, ?a);
+    if (sel cr.ok)                   { ret 1; }
+    if (!sel cr.err.container)       { ret 1; }
+    if (!sel cr.err.container.short) { ret 1; }
+
+    var jbuf: [16]u8;
+    val jl:   usize                  = append_cstr(?jbuf[0], 0, "[]");
+    var buf:  [64]u8;
+    val n:    usize                  = assemble_glb(?buf[0], ?jbuf[0], jl, nil, 0);
+    val dr:   res[Loaded, LoadError] = load_glb(?buf[0], n, ?a);
+    if (sel dr.ok)                    { ret 1; }
+    if (!sel dr.err.document)         { ret 1; }
+    if (!sel dr.err.document.invalid) { ret 1; }
     ret 0;
 }
