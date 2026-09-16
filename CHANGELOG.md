@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-16
+
+Builds with Mach 5.0 and std 3.2.0, and every failure is a closed error tag. This is a breaking release: error results, optional references and glTF enumerations all change type.
+
 ### Added
 - manifest: `linux-arm64` and `darwin-aarch64` targets, so the native aarch64 hosts build and test for themselves instead of falling back to linux-x86_64.
+
 ### Changed
 - ci: CI runs the family pipeline (`briar-systems/.github` `mach-lib.yml`) on the pinned, checksum-verified mach seed: debug and release build and test, `mach fmt --check` and an all-targets release build on x86_64-linux for pull requests into dev, plus native aarch64-linux, windows and darwin legs for pull requests into main. A `gate` job is the one required check.
 - **Builds against std 3.2.0** (#15). `[dep.std]` moves from `tag/v2.1.0` to `tag/v3.2.0`. No source changes were needed since this library does no io.
