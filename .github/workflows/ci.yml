@@ -27,7 +27,7 @@ jobs:
           mach info
 
       - name: Sync dependencies
-        run: mach dep pull
+        run: mach dep pull .
 
       # the loader is pure parsing: no system libraries, no display, no OS deps.
       - name: Build

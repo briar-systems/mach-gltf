@@ -1,8 +1,11 @@
 # the in-memory glTF 2.0 document model
 #
 # typed records mirroring the glTF top-level arrays and their cross-references.
-# indices between arrays are stored as i64 with NONE marking an absent optional
-# reference.
+# indices between arrays are `usize`, and an optional reference is `opt[usize]`
+# that reads `none` when the document omitted it. every closed glTF enumeration
+# (component type, element shape, topology, filters, wrap modes, interpolation,
+# channel path, alpha mode) is a tag, so a parsed document holds no value
+# outside the specification and no consumer handles an unrecognized code.
 #
 # OWNERSHIP. every string and every array in a Document is allocated from the
 # allocator passed to `gltf.parse.parse_document`, and nothing points into the
@@ -19,89 +22,115 @@
 # element layout; the JSON bridge lives in gltf.parse.
 
 use std.types.bool.bool;
+use std.types.option.opt;
 use std.types.size.usize;
 use std.types.string.str;
 use slice: std.collections.slice;
 
-# sentinel for an absent optional index (glTF indices are non-negative)
-pub val NONE: i64 = -1;
+# glTF accessor component type (the OpenGL scalar type codes 5120 through 5126)
+pub tag ComponentType: u8 {
+    byte;
+    unsigned_byte;
+    short;
+    unsigned_short;
+    unsigned_int;
+    float;
+}
 
-# glTF accessor component type (an OpenGL scalar type enum)
-pub def ComponentType: u32;
-pub val COMPONENT_BYTE:           ComponentType = 5120;
-pub val COMPONENT_UNSIGNED_BYTE:  ComponentType = 5121;
-pub val COMPONENT_SHORT:          ComponentType = 5122;
-pub val COMPONENT_UNSIGNED_SHORT: ComponentType = 5123;
-pub val COMPONENT_UNSIGNED_INT:   ComponentType = 5125;
-pub val COMPONENT_FLOAT:          ComponentType = 5126;
+# glTF accessor element shape
+pub tag AccessorType: u8 {
+    scalar;
+    vec2;
+    vec3;
+    vec4;
+    mat2;
+    mat3;
+    mat4;
+}
 
-# glTF accessor element shape (SCALAR through MAT4)
-pub def AccessorType: u8;
-pub val TYPE_SCALAR: AccessorType = 0;
-pub val TYPE_VEC2:   AccessorType = 1;
-pub val TYPE_VEC3:   AccessorType = 2;
-pub val TYPE_VEC4:   AccessorType = 3;
-pub val TYPE_MAT2:   AccessorType = 4;
-pub val TYPE_MAT3:   AccessorType = 5;
-pub val TYPE_MAT4:   AccessorType = 6;
+# glTF primitive topology (the OpenGL draw modes 0 through 6)
+pub tag PrimitiveMode: u8 {
+    points;
+    lines;
+    line_loop;
+    line_strip;
+    triangles;
+    triangle_strip;
+    triangle_fan;
+}
 
-# glTF primitive topology (an OpenGL draw-mode enum)
-pub def PrimitiveMode: u32;
-pub val MODE_POINTS:         PrimitiveMode = 0;
-pub val MODE_LINES:          PrimitiveMode = 1;
-pub val MODE_LINE_LOOP:      PrimitiveMode = 2;
-pub val MODE_LINE_STRIP:     PrimitiveMode = 3;
-pub val MODE_TRIANGLES:      PrimitiveMode = 4;
-pub val MODE_TRIANGLE_STRIP: PrimitiveMode = 5;
-pub val MODE_TRIANGLE_FAN:   PrimitiveMode = 6;
+# the GPU buffer a buffer view is intended for (34962 and 34963)
+pub tag BufferTarget: u8 {
+    array_buffer;
+    element_array_buffer;
+}
+
+# texture magnification filter (9728 and 9729)
+pub tag MagFilter: u8 {
+    nearest;
+    linear;
+}
+
+# texture minification filter (9728, 9729 and 9984 through 9987)
+pub tag MinFilter: u8 {
+    nearest;
+    linear;
+    nearest_mipmap_nearest;
+    linear_mipmap_nearest;
+    nearest_mipmap_linear;
+    linear_mipmap_linear;
+}
+
+# texture coordinate wrap mode (33071, 33648 and 10497)
+pub tag WrapMode: u8 {
+    clamp_to_edge;
+    mirrored_repeat;
+    repeat;
+}
 
 # animation sampler interpolation mode
-pub def Interpolation: u8;
-pub val INTERP_LINEAR:      Interpolation = 0;
-pub val INTERP_STEP:        Interpolation = 1;
-pub val INTERP_CUBICSPLINE: Interpolation = 2;
+pub tag Interpolation: u8 {
+    linear;
+    step;
+    cubic_spline;
+}
 
 # the node property an animation channel drives
-pub def TargetPath: u8;
-pub val PATH_TRANSLATION: TargetPath = 0;
-pub val PATH_ROTATION:    TargetPath = 1;
-pub val PATH_SCALE:       TargetPath = 2;
-pub val PATH_WEIGHTS:     TargetPath = 3;
+pub tag TargetPath: u8 {
+    translation;
+    rotation;
+    scale;
+    weights;
+}
 
 # material alpha interpretation
-pub def AlphaMode: u8;
-pub val ALPHA_OPAQUE: AlphaMode = 0;
-pub val ALPHA_MASK:   AlphaMode = 1;
-pub val ALPHA_BLEND:  AlphaMode = 2;
+pub tag AlphaMode: u8 {
+    opaque;
+    mask;
+    blend;
+}
 
 # the largest accessor element (MAT4) has 16 components
 pub val MAX_COMPONENTS: usize = 16;
 
 # number of scalar components in an accessor element type
-# ---
-# ret: 1..16 for a known type, 0 for an unrecognized value
 pub fun component_count(t: AccessorType) usize {
-    if (t == TYPE_SCALAR) { ret 1; }
-    if (t == TYPE_VEC2)   { ret 2; }
-    if (t == TYPE_VEC3)   { ret 3; }
-    if (t == TYPE_VEC4)   { ret 4; }
-    if (t == TYPE_MAT2)   { ret 4; }
-    if (t == TYPE_MAT3)   { ret 9; }
-    if (t == TYPE_MAT4)   { ret 16; }
-    ret 0;
+    if (sel t.scalar) { ret 1; }
+    if (sel t.vec2)   { ret 2; }
+    if (sel t.vec3)   { ret 3; }
+    if (sel t.vec4)   { ret 4; }
+    if (sel t.mat2)   { ret 4; }
+    if (sel t.mat3)   { ret 9; }
+    ret 16;
 }
 
 # byte width of a single accessor component
-# ---
-# ret: 1, 2, or 4 for a known component type, 0 for an unrecognized value
 pub fun component_size(c: ComponentType) usize {
-    if (c == COMPONENT_BYTE)           { ret 1; }
-    if (c == COMPONENT_UNSIGNED_BYTE)  { ret 1; }
-    if (c == COMPONENT_SHORT)          { ret 2; }
-    if (c == COMPONENT_UNSIGNED_SHORT) { ret 2; }
-    if (c == COMPONENT_UNSIGNED_INT)   { ret 4; }
-    if (c == COMPONENT_FLOAT)          { ret 4; }
-    ret 0;
+    if (sel c.byte)           { ret 1; }
+    if (sel c.unsigned_byte)  { ret 1; }
+    if (sel c.short)          { ret 2; }
+    if (sel c.unsigned_short) { ret 2; }
+    ret 4;
 }
 
 # document metadata from the required top-level `asset` object
@@ -134,20 +163,20 @@ pub rec Buffer {
 # byte_offset: start offset into the buffer
 # byte_length: length of the view in bytes
 # byte_stride: element stride, 0 when tightly packed (unspecified)
-# target:      intended GPU target (34962/34963), or NONE
+# target:      intended GPU buffer, none when unspecified
 # name:        user-defined name, empty when absent
 pub rec BufferView {
-    buffer:      i64;
+    buffer:      usize;
     byte_offset: usize;
     byte_length: usize;
     byte_stride: usize;
-    target:      i64;
+    target:      opt[BufferTarget];
     name:        str;
 }
 
 # a typed view over a buffer view's bytes as element data
 # ---
-# buffer_view:    index of the source buffer view, or NONE
+# buffer_view:    index of the source buffer view, none for an all-zero accessor
 # byte_offset:    start offset relative to the buffer view
 # component_type: scalar component type
 # normalized:     whether integer components map to a normalized float range
@@ -160,7 +189,7 @@ pub rec BufferView {
 # has_max:        whether the accessor declared maximum bounds
 # name:           user-defined name, empty when absent
 pub rec Accessor {
-    buffer_view:    i64;
+    buffer_view:    opt[usize];
     byte_offset:    usize;
     component_type: ComponentType;
     normalized:     bool;
@@ -175,8 +204,6 @@ pub rec Accessor {
 }
 
 # byte size of one accessor element (component_count * component_size)
-# ---
-# ret: element size in bytes, or 0 when the accessor's type or component is unrecognized
 pub fun element_size(a: *Accessor) usize {
     ret component_count(a.element_type) * component_size(a.component_type);
 }
@@ -194,7 +221,7 @@ pub fun scalar_count(a: *Accessor) usize {
 # accessor: index of the accessor supplying the attribute's data
 pub rec Attribute {
     name:     str;
-    accessor: i64;
+    accessor: usize;
 }
 
 # a primitive morph target, its own set of attribute bindings
@@ -208,14 +235,14 @@ pub rec MorphTarget {
 # ---
 # attributes: vertex attribute bindings
 # targets:    morph targets, empty when absent
-# indices:    accessor index for element indices, or NONE for non-indexed
-# material:   material index, or NONE for the default material
+# indices:    accessor index for element indices, none for non-indexed
+# material:   material index, none for the default material
 # mode:       primitive topology
 pub rec Primitive {
     attributes: slice.Slice[Attribute];
     targets:    slice.Slice[MorphTarget];
-    indices:    i64;
-    material:   i64;
+    indices:    opt[usize];
+    material:   opt[usize];
     mode:       PrimitiveMode;
 }
 
@@ -233,9 +260,9 @@ pub rec Mesh {
 # a scene-graph node with a local transform and optional attachments
 # ---
 # children:    indices of child nodes
-# mesh:        attached mesh index, or NONE
-# skin:        attached skin index, or NONE
-# camera:      attached camera index, or NONE
+# mesh:        attached mesh index, or none
+# skin:        attached skin index, or none
+# camera:      attached camera index, or none
 # has_matrix:  whether a matrix transform was given (otherwise use TRS)
 # matrix:      column-major local transform, valid when has_matrix
 # translation: TRS translation, spec default (0,0,0)
@@ -244,10 +271,10 @@ pub rec Mesh {
 # weights:     morph target weights override, empty when absent
 # name:        user-defined name, empty when absent
 pub rec Node {
-    children:    slice.Slice[i64];
-    mesh:        i64;
-    skin:        i64;
-    camera:      i64;
+    children:    slice.Slice[usize];
+    mesh:        opt[usize];
+    skin:        opt[usize];
+    camera:      opt[usize];
     has_matrix:  bool;
     matrix:      [16]f32;
     translation: [3]f32;
@@ -262,54 +289,54 @@ pub rec Node {
 # nodes: indices of the scene's root nodes
 # name:  user-defined name, empty when absent
 pub rec Scene {
-    nodes: slice.Slice[i64];
+    nodes: slice.Slice[usize];
     name:  str;
 }
 
 # a material's reference to a texture and its UV set
 # ---
-# index:     texture index, or NONE when the reference is absent
+# index:     texture index
 # tex_coord: TEXCOORD attribute set index, spec default 0
 pub rec TextureRef {
-    index:     i64;
-    tex_coord: i64;
+    index:     usize;
+    tex_coord: usize;
 }
 
 # the metallic-roughness PBR parameter set
 # ---
 # base_color_factor:          linear RGBA base color multiplier, default (1,1,1,1)
-# base_color_texture:         base color texture reference
+# base_color_texture:         base color texture reference, or none
 # metallic_factor:            metalness multiplier, default 1
 # roughness_factor:           roughness multiplier, default 1
-# metallic_roughness_texture: combined metallic-roughness texture reference
+# metallic_roughness_texture: combined metallic-roughness texture reference, or none
 pub rec PbrMetallicRoughness {
     base_color_factor:          [4]f32;
-    base_color_texture:         TextureRef;
+    base_color_texture:         opt[TextureRef];
     metallic_factor:            f32;
     roughness_factor:           f32;
-    metallic_roughness_texture: TextureRef;
+    metallic_roughness_texture: opt[TextureRef];
 }
 
 # surface appearance parameters
 # ---
 # pbr:                metallic-roughness parameters
-# normal_texture:     tangent-space normal map reference
+# normal_texture:     tangent-space normal map reference, or none
 # normal_scale:       normal map strength, default 1
-# occlusion_texture:  ambient occlusion texture reference
+# occlusion_texture:  ambient occlusion texture reference, or none
 # occlusion_strength: occlusion strength, default 1
-# emissive_texture:   emissive texture reference
+# emissive_texture:   emissive texture reference, or none
 # emissive_factor:    emissive color, default (0,0,0)
-# alpha_mode:         alpha interpretation, default OPAQUE
-# alpha_cutoff:       MASK-mode alpha threshold, default 0.5
+# alpha_mode:         alpha interpretation, default opaque
+# alpha_cutoff:       mask-mode alpha threshold, default 0.5
 # double_sided:       whether back faces are rendered
 # name:               user-defined name, empty when absent
 pub rec Material {
     pbr:                PbrMetallicRoughness;
-    normal_texture:     TextureRef;
+    normal_texture:     opt[TextureRef];
     normal_scale:       f32;
-    occlusion_texture:  TextureRef;
+    occlusion_texture:  opt[TextureRef];
     occlusion_strength: f32;
-    emissive_texture:   TextureRef;
+    emissive_texture:   opt[TextureRef];
     emissive_factor:    [3]f32;
     alpha_mode:         AlphaMode;
     alpha_cutoff:       f32;
@@ -319,12 +346,12 @@ pub rec Material {
 
 # a sampled image, pairing an image source with a sampler
 # ---
-# source:  image index, or NONE
-# sampler: sampler index, or NONE (use default sampling)
+# source:  image index, or none
+# sampler: sampler index, or none (use default sampling)
 # name:    user-defined name, empty when absent
 pub rec Texture {
-    source:  i64;
-    sampler: i64;
+    source:  opt[usize];
+    sampler: opt[usize];
     name:    str;
 }
 
@@ -332,40 +359,40 @@ pub rec Texture {
 # ---
 # uri:         source URI, empty when sourced from a buffer view
 # mime_type:   MIME type, relevant for buffer-view-sourced images
-# buffer_view: buffer view index supplying the bytes, or NONE
+# buffer_view: buffer view index supplying the bytes, or none
 # name:        user-defined name, empty when absent
 pub rec Image {
     uri:         str;
     mime_type:   str;
-    buffer_view: i64;
+    buffer_view: opt[usize];
     name:        str;
 }
 
 # texture filtering and wrapping parameters
 # ---
-# mag_filter: magnification filter enum, or NONE
-# min_filter: minification filter enum, or NONE
-# wrap_s:     S-axis wrap mode, spec default 10497 (REPEAT)
-# wrap_t:     T-axis wrap mode, spec default 10497 (REPEAT)
+# mag_filter: magnification filter, none to let the client choose
+# min_filter: minification filter, none to let the client choose
+# wrap_s:     S-axis wrap mode, spec default repeat
+# wrap_t:     T-axis wrap mode, spec default repeat
 # name:       user-defined name, empty when absent
 pub rec Sampler {
-    mag_filter: i64;
-    min_filter: i64;
-    wrap_s:     i64;
-    wrap_t:     i64;
+    mag_filter: opt[MagFilter];
+    min_filter: opt[MinFilter];
+    wrap_s:     WrapMode;
+    wrap_t:     WrapMode;
     name:       str;
 }
 
 # joint hierarchy and bind data for skeletal animation
 # ---
-# inverse_bind_matrices: accessor index of the inverse bind matrices, or NONE
-# skeleton:              index of the common root node, or NONE
+# inverse_bind_matrices: accessor index of the inverse bind matrices, or none
+# skeleton:              index of the common root node, or none
 # joints:                node indices used as joints, ordered
 # name:                  user-defined name, empty when absent
 pub rec Skin {
-    inverse_bind_matrices: i64;
-    skeleton:              i64;
-    joints:                slice.Slice[i64];
+    inverse_bind_matrices: opt[usize];
+    skeleton:              opt[usize];
+    joints:                slice.Slice[usize];
     name:                  str;
 }
 
@@ -375,19 +402,19 @@ pub rec Skin {
 # output:        accessor index of keyframe output values
 # interpolation: interpolation mode between keyframes
 pub rec AnimationSampler {
-    input:         i64;
-    output:        i64;
+    input:         usize;
+    output:        usize;
     interpolation: Interpolation;
 }
 
 # a binding of a sampler to a target node property
 # ---
 # sampler:     index of the driving sampler within the animation
-# target_node: driven node index, or NONE
+# target_node: driven node index, or none
 # target_path: driven node property
 pub rec AnimationChannel {
-    sampler:     i64;
-    target_node: i64;
+    sampler:     usize;
+    target_node: opt[usize];
     target_path: TargetPath;
 }
 
@@ -405,7 +432,7 @@ pub rec Animation {
 # the parsed glTF asset, holding every top-level array
 # ---
 # asset:        document metadata
-# scene:        default scene index, or NONE
+# scene:        default scene index, or none
 # scenes:       scene definitions
 # nodes:        node definitions
 # meshes:       mesh definitions
@@ -420,7 +447,7 @@ pub rec Animation {
 # animations:   animation definitions
 pub rec Document {
     asset:        Asset;
-    scene:        i64;
+    scene:        opt[usize];
     scenes:       slice.Slice[Scene];
     nodes:        slice.Slice[Node];
     meshes:       slice.Slice[Mesh];
@@ -436,34 +463,34 @@ pub rec Document {
 }
 
 test "doc: component_count covers every element type" {
-    if (component_count(TYPE_SCALAR) != 1) { ret 1; }
-    if (component_count(TYPE_VEC2) != 2) { ret 1; }
-    if (component_count(TYPE_VEC3) != 3) { ret 1; }
-    if (component_count(TYPE_VEC4) != 4) { ret 1; }
-    if (component_count(TYPE_MAT2) != 4) { ret 1; }
-    if (component_count(TYPE_MAT3) != 9) { ret 1; }
-    if (component_count(TYPE_MAT4) != 16) { ret 1; }
+    if (component_count(AccessorType.scalar{}) != 1) { ret 1; }
+    if (component_count(AccessorType.vec2{}) != 2) { ret 1; }
+    if (component_count(AccessorType.vec3{}) != 3) { ret 1; }
+    if (component_count(AccessorType.vec4{}) != 4) { ret 1; }
+    if (component_count(AccessorType.mat2{}) != 4) { ret 1; }
+    if (component_count(AccessorType.mat3{}) != 9) { ret 1; }
+    if (component_count(AccessorType.mat4{}) != 16) { ret 1; }
     ret 0;
 }
 
 test "doc: component_size covers every component type" {
-    if (component_size(COMPONENT_BYTE) != 1) { ret 1; }
-    if (component_size(COMPONENT_UNSIGNED_BYTE) != 1) { ret 1; }
-    if (component_size(COMPONENT_SHORT) != 2) { ret 1; }
-    if (component_size(COMPONENT_UNSIGNED_SHORT) != 2) { ret 1; }
-    if (component_size(COMPONENT_UNSIGNED_INT) != 4) { ret 1; }
-    if (component_size(COMPONENT_FLOAT) != 4) { ret 1; }
+    if (component_size(ComponentType.byte{}) != 1) { ret 1; }
+    if (component_size(ComponentType.unsigned_byte{}) != 1) { ret 1; }
+    if (component_size(ComponentType.short{}) != 2) { ret 1; }
+    if (component_size(ComponentType.unsigned_short{}) != 2) { ret 1; }
+    if (component_size(ComponentType.unsigned_int{}) != 4) { ret 1; }
+    if (component_size(ComponentType.float{}) != 4) { ret 1; }
     ret 0;
 }
 
 test "doc: element_size multiplies component count by component width" {
     var a: Accessor;
-    a.element_type = TYPE_VEC3;
-    a.component_type = COMPONENT_FLOAT;
+    a.element_type = AccessorType.vec3{};
+    a.component_type = ComponentType.float{};
     if (element_size(?a) != 12) { ret 1; }
 
-    a.element_type = TYPE_SCALAR;
-    a.component_type = COMPONENT_UNSIGNED_SHORT;
+    a.element_type = AccessorType.scalar{};
+    a.component_type = ComponentType.unsigned_short{};
     if (element_size(?a) != 2) { ret 1; }
     ret 0;
 }

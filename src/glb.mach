@@ -10,17 +10,12 @@
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
-use std.types.string.str;
 use bytes: gltf.bytes;
 
-# the .glb file magic, the ASCII bytes "glTF" read little-endian
+# the container magic, the ASCII bytes "glTF" read little-endian
 pub val MAGIC: u32 = 0x46546C67;
 
 # the container version defined by glTF 2.0
@@ -37,6 +32,30 @@ pub val HEADER_SIZE: usize = 12;
 
 # byte length of a chunk's length+type prefix
 pub val CHUNK_HEADER_SIZE: usize = 8;
+
+# why a byte buffer is not a well-formed .glb container
+# ---
+# short:           the buffer is shorter than the 12-byte header; carries its length
+# magic:           the header magic is not MAGIC; carries the magic found
+# version:         the header version is not VERSION; carries the version found
+# length:          the declared total length is smaller than the header or larger
+#                  than the buffer; carries the declared length
+# chunk_truncated: a chunk header runs past the declared length; carries its offset
+# chunk_alignment: a chunk length is not a multiple of 4; carries the chunk's offset
+# chunk_overrun:   a chunk's data runs past the declared length; carries its offset
+# first_chunk:     the first chunk is not JSON; carries the chunk type found
+# no_json:         the container holds no chunk at all
+pub tag ContainerError: u8 {
+    short:           usize;
+    magic:           u32;
+    version:         u32;
+    length:          u32;
+    chunk_truncated: usize;
+    chunk_alignment: usize;
+    chunk_overrun:   usize;
+    first_chunk:     u32;
+    no_json;
+}
 
 # the 12-byte .glb file header, matching the on-disk layout
 # ---
@@ -89,20 +108,19 @@ pub fun is_valid(h: *Header) bool {
     ret h.magic == MAGIC && h.version == VERSION;
 }
 
-# read and range-check the 12-byte container header
+# read the 12-byte container header
 # ---
 # data: source buffer
 # len:  source length in bytes
-# ret:  the header, or an error when the buffer is too short
-pub fun read_header(data: *u8, len: usize) Result[Header, str] {
-    if (data == nil) { ret err[Header, str]("glb buffer is nil"); }
-    if (len < HEADER_SIZE) { ret err[Header, str]("buffer shorter than glb header"); }
+# ret:  the header, or short when the buffer cannot hold one
+pub fun read_header(data: *u8, len: usize) res[Header, ContainerError] {
+    if (len < HEADER_SIZE) { ret res[Header, ContainerError].err{ContainerError.short{len}}; }
 
     var h: Header;
     h.magic   = bytes.read_u32(data, 0);
     h.version = bytes.read_u32(data, 4);
     h.length  = bytes.read_u32(data, 8);
-    ret ok[Header, str](h);
+    ret res[Header, ContainerError].ok{h};
 }
 
 # begin walking chunks after validating the container header
@@ -113,23 +131,23 @@ pub fun read_header(data: *u8, len: usize) Result[Header, str] {
 # ---
 # data: source buffer
 # len:  source length in bytes
-# ret:  an iterator positioned at the first chunk, or an error
-pub fun chunk_iter(data: *u8, len: usize) Result[ChunkIter, str] {
-    val hr: Result[Header, str] = read_header(data, len);
-    if (is_err[Header, str](hr)) { ret err[ChunkIter, str](unwrap_err[Header, str](hr)); }
-    val h: Header = unwrap_ok[Header, str](hr);
+# ret:  an iterator positioned at the first chunk, or the header's defect
+pub fun chunk_iter(data: *u8, len: usize) res[ChunkIter, ContainerError] {
+    val hr: res[Header, ContainerError] = read_header(data, len);
+    if (sel hr.err) { ret res[ChunkIter, ContainerError].err{hr.err}; }
+    val h: Header = hr.ok;
 
-    if (!is_valid(?h)) { ret err[ChunkIter, str]("bad glb magic or version"); }
+    if (h.magic != MAGIC) { ret res[ChunkIter, ContainerError].err{ContainerError.magic{h.magic}}; }
+    if (h.version != VERSION) { ret res[ChunkIter, ContainerError].err{ContainerError.version{h.version}}; }
 
     val total: usize = h.length::usize;
-    if (total < HEADER_SIZE) { ret err[ChunkIter, str]("header length smaller than header"); }
-    if (total > len) { ret err[ChunkIter, str]("header length exceeds buffer"); }
+    if (total < HEADER_SIZE || total > len) { ret res[ChunkIter, ContainerError].err{ContainerError.length{h.length}}; }
 
     var it: ChunkIter;
     it.src = data;
     it.end = total;
     it.pos = HEADER_SIZE;
-    ret ok[ChunkIter, str](it);
+    ret res[ChunkIter, ContainerError].ok{it};
 }
 
 # advance the iterator to the next chunk
@@ -138,24 +156,26 @@ pub fun chunk_iter(data: *u8, len: usize) Result[ChunkIter, str] {
 # is not, or that runs past the container end, is rejected as malformed.
 # ---
 # it:  iterator to advance
-# out: receives the next chunk when one is produced
-# ret: true when out was filled, false at the end of the chunk region, or an error
-pub fun chunk_next(it: *ChunkIter, out: *Chunk) Result[bool, str] {
-    if (it.pos >= it.end) { ret ok[bool, str](false); }
-    if (it.pos + CHUNK_HEADER_SIZE > it.end) { ret err[bool, str]("truncated chunk header"); }
+# ret: the next chunk, none at the end of the chunk region, or the chunk's defect
+pub fun chunk_next(it: *ChunkIter) res[opt[Chunk], ContainerError] {
+    if (it.pos >= it.end) { ret res[opt[Chunk], ContainerError].ok{opt[Chunk].none{}}; }
+    if (it.pos + CHUNK_HEADER_SIZE > it.end) {
+        ret res[opt[Chunk], ContainerError].err{ContainerError.chunk_truncated{it.pos}};
+    }
 
     val clen: usize = bytes.read_u32(it.src, it.pos)::usize;
     val ckind: u32  = bytes.read_u32(it.src, it.pos + 4);
-    if (clen % 4 != 0) { ret err[bool, str]("chunk length not 4-byte aligned"); }
+    if (clen % 4 != 0) { ret res[opt[Chunk], ContainerError].err{ContainerError.chunk_alignment{it.pos}}; }
 
     val dstart: usize = it.pos + CHUNK_HEADER_SIZE;
-    if (dstart + clen > it.end) { ret err[bool, str]("chunk data exceeds container"); }
+    if (clen > it.end - dstart) { ret res[opt[Chunk], ContainerError].err{ContainerError.chunk_overrun{it.pos}}; }
 
-    out.kind = ckind;
-    out.data = (it.src::usize + dstart)::*u8;
-    out.len  = clen;
+    var c: Chunk;
+    c.kind = ckind;
+    c.data = (it.src::usize + dstart)::*u8;
+    c.len  = clen;
     it.pos = dstart + clen;
-    ret ok[bool, str](true);
+    ret res[opt[Chunk], ContainerError].ok{opt[Chunk].some{c}};
 }
 
 # validate a .glb buffer and extract its JSON and optional BIN spans
@@ -165,11 +185,11 @@ pub fun chunk_next(it: *ChunkIter, out: *Chunk) Result[bool, str] {
 # ---
 # data: source buffer
 # len:  source length in bytes
-# ret:  the JSON and BIN spans, or an error for any malformed container
-pub fun parse_glb(data: *u8, len: usize) Result[Glb, str] {
-    val ir: Result[ChunkIter, str] = chunk_iter(data, len);
-    if (is_err[ChunkIter, str](ir)) { ret err[Glb, str](unwrap_err[ChunkIter, str](ir)); }
-    var it: ChunkIter = unwrap_ok[ChunkIter, str](ir);
+# ret:  the JSON and BIN spans, or the container's first defect
+pub fun parse_glb(data: *u8, len: usize) res[Glb, ContainerError] {
+    val ir: res[ChunkIter, ContainerError] = chunk_iter(data, len);
+    if (sel ir.err) { ret res[Glb, ContainerError].err{ir.err}; }
+    var it: ChunkIter = ir.ok;
 
     var g: Glb;
     g.json = nil;
@@ -180,14 +200,14 @@ pub fun parse_glb(data: *u8, len: usize) Result[Glb, str] {
     var seen_json: bool = false;
     var seen_bin: bool = false;
 
-    for (true) {
-        var c: Chunk;
-        val nr: Result[bool, str] = chunk_next(?it, ?c);
-        if (is_err[bool, str](nr)) { ret err[Glb, str](unwrap_err[bool, str](nr)); }
-        if (!unwrap_ok[bool, str](nr)) { brk; }
+    for {
+        val nr: res[opt[Chunk], ContainerError] = chunk_next(?it);
+        if (sel nr.err) { ret res[Glb, ContainerError].err{nr.err}; }
+        if (sel nr.ok.none) { brk; }
+        val c: Chunk = nr.ok.some;
 
         if (!seen_json) {
-            if (c.kind != CHUNK_JSON) { ret err[Glb, str]("first chunk is not JSON"); }
+            if (c.kind != CHUNK_JSON) { ret res[Glb, ContainerError].err{ContainerError.first_chunk{c.kind}}; }
             g.json = c.data;
             g.json_len = c.len;
             seen_json = true;
@@ -201,8 +221,8 @@ pub fun parse_glb(data: *u8, len: usize) Result[Glb, str] {
         }
     }
 
-    if (!seen_json) { ret err[Glb, str]("container has no JSON chunk"); }
-    ret ok[Glb, str](g);
+    if (!seen_json) { ret res[Glb, ContainerError].err{ContainerError.no_json{}}; }
+    ret res[Glb, ContainerError].ok{g};
 }
 
 test "glb: container magic and chunk tags match the specification" {
@@ -256,9 +276,9 @@ test "glb: parse_glb extracts the JSON and BIN spans" {
     var buf: [36]u8;
     val n: usize = build_container(?buf[0]);
 
-    val r: Result[Glb, str] = parse_glb(?buf[0], n);
-    if (is_err[Glb, str](r)) { ret 1; }
-    val g: Glb = unwrap_ok[Glb, str](r);
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], n);
+    if (sel r.err) { ret 1; }
+    val g: Glb = r.ok;
 
     if (g.json_len != 4) { ret 1; }
     if (g.json[0] != '{' || g.json[1] != '}') { ret 1; }
@@ -280,9 +300,9 @@ test "glb: parse_glb yields nil BIN when only a JSON chunk is present" {
     buf[22] = ' ';
     buf[23] = ' ';
 
-    val r: Result[Glb, str] = parse_glb(?buf[0], 24);
-    if (is_err[Glb, str](r)) { ret 1; }
-    val g: Glb = unwrap_ok[Glb, str](r);
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], 24);
+    if (sel r.err) { ret 1; }
+    val g: Glb = r.ok;
     if (g.json_len != 4) { ret 1; }
     if (g.bin != nil) { ret 1; }
     if (g.bin_len != 0) { ret 1; }
@@ -293,7 +313,10 @@ test "glb: parse_glb rejects a bad magic" {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 0, 0);
-    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], 36);
+    if (sel r.ok) { ret 1; }
+    if (!sel r.err.magic) { ret 1; }
+    if (r.err.magic != 0) { ret 1; }
     ret 0;
 }
 
@@ -301,7 +324,10 @@ test "glb: parse_glb rejects a header length past the buffer" {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 8, 64);
-    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], 36);
+    if (sel r.ok) { ret 1; }
+    if (!sel r.err.length) { ret 1; }
+    if (r.err.length != 64) { ret 1; }
     ret 0;
 }
 
@@ -309,7 +335,10 @@ test "glb: parse_glb rejects a misaligned chunk length" {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 12, 3);
-    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], 36);
+    if (sel r.ok) { ret 1; }
+    if (!sel r.err.chunk_alignment) { ret 1; }
+    if (r.err.chunk_alignment != 12) { ret 1; }
     ret 0;
 }
 
@@ -317,7 +346,10 @@ test "glb: parse_glb rejects a chunk running past the container" {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 12, 64);
-    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], 36);
+    if (sel r.ok) { ret 1; }
+    if (!sel r.err.chunk_overrun) { ret 1; }
+    if (r.err.chunk_overrun != 12) { ret 1; }
     ret 0;
 }
 
@@ -325,7 +357,10 @@ test "glb: parse_glb rejects a first chunk that is not JSON" {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 16, CHUNK_BIN);
-    if (!is_err[Glb, str](parse_glb(?buf[0], 36))) { ret 1; }
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], 36);
+    if (sel r.ok) { ret 1; }
+    if (!sel r.err.first_chunk) { ret 1; }
+    if (r.err.first_chunk != CHUNK_BIN) { ret 1; }
     ret 0;
 }
 
@@ -333,6 +368,48 @@ test "glb: parse_glb rejects a buffer shorter than the header" {
     var buf: [8]u8;
     bytes.write_u32(?buf[0], 0, MAGIC);
     bytes.write_u32(?buf[0], 4, VERSION);
-    if (!is_err[Glb, str](parse_glb(?buf[0], 8))) { ret 1; }
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], 8);
+    if (sel r.ok) { ret 1; }
+    if (!sel r.err.short) { ret 1; }
+    if (r.err.short != 8) { ret 1; }
+    ret 0;
+}
+
+test "glb: parse_glb rejects a bad version" {
+    var buf: [36]u8;
+    build_container(?buf[0]);
+    bytes.write_u32(?buf[0], 4, 1);
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], 36);
+    if (sel r.ok) { ret 1; }
+    if (!sel r.err.version) { ret 1; }
+    if (r.err.version != 1) { ret 1; }
+    ret 0;
+}
+
+test "glb: parse_glb rejects a container with no chunks" {
+    var buf: [12]u8;
+    bytes.write_u32(?buf[0], 0, MAGIC);
+    bytes.write_u32(?buf[0], 4, VERSION);
+    bytes.write_u32(?buf[0], 8, 12);
+    val r: res[Glb, ContainerError] = parse_glb(?buf[0], 12);
+    if (sel r.ok) { ret 1; }
+    if (!sel r.err.no_json) { ret 1; }
+    ret 0;
+}
+
+test "glb: chunk_next reports a truncated chunk header" {
+    var buf: [36]u8;
+    build_container(?buf[0]);
+    bytes.write_u32(?buf[0], 8, 28);
+    val ir: res[ChunkIter, ContainerError] = chunk_iter(?buf[0], 36);
+    if (sel ir.err) { ret 1; }
+    var it: ChunkIter = ir.ok;
+    val first: res[opt[Chunk], ContainerError] = chunk_next(?it);
+    if (sel first.err) { ret 1; }
+    if (!sel first.ok.some) { ret 1; }
+    val second: res[opt[Chunk], ContainerError] = chunk_next(?it);
+    if (sel second.ok) { ret 1; }
+    if (!sel second.err.chunk_truncated) { ret 1; }
+    if (second.err.chunk_truncated != 24) { ret 1; }
     ret 0;
 }

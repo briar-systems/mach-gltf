@@ -19,10 +19,12 @@ fun accepts(h: *gltf.Header) bool {
 Consuming projects vendor the loader as a normal Mach dependency:
 
 ```toml
-[deps.mach-gltf]
+[dep.gltf]
 git = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/main"
 ```
+
+Requires Mach 5.0 or newer and std 2.1.
 
 ## Scope
 
@@ -61,8 +63,8 @@ are both JSON, and it comes from the standard library
 ([`std.data.json`](https://github.com/briar-systems/mach-std)) rather than an
 in-tree parser. `std.data.json` now parses the full RFC 8259 number grammar, so
 glTF's floating-point values — node transforms, accessor bounds, and material
-factors — load directly; the lockfile pins a `mach-std` commit carrying that
-support.
+factors — load directly; the committed `dep/std` gitlink pins the std release
+carrying that support.
 
 ## Status
 
@@ -72,6 +74,16 @@ float fields), and binary accessor readers over buffer bytes. What is not yet
 implemented: reading `.gltf` (external `.bin` and `data:` URI buffers) — only
 the `.glb` JSON chunk and BIN buffer are wired today — and the animation runtime
 (deliberately out of scope, see above).
+
+## Failures
+
+Every fallible call returns a std `res` over a closed error tag, so a consumer
+matches cases with `sel` instead of reading messages. `parse_glb` fails with
+`ContainerError`, `parse_document` with `DocumentError` (a `Site` names the
+top-level element a `missing` or `invalid` member was read under), `load_glb`
+with `LoadError` nesting either, `plan` with `PlanError` and the `read_*`
+functions with `ReadError`. An absent optional reference in the document is
+`opt[usize]`, and every glTF enumeration is a tag.
 
 ## Architecture
 

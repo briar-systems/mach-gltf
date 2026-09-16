@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Builds with Mach 5.0 and std 2.1.** The dependency is `[dep.std]`, pinned by the committed `dep/std` gitlink, and `mach.lock` is gone. Every profile states its full field set and the linux-x86_64 target, debug profile and library artifact are the defaults.
+- **Failures are closed error tags, not strings.** `Result[T, str]` becomes `res[T, E]`: `read_header`, `chunk_iter` and `parse_glb` fail with `ContainerError`; `parse_document` with `DocumentError` (`json`, `alloc`, `version`, `missing: Site`, `invalid: Site`); `load_glb` with `LoadError` (`container`, `document`); `plan` with `PlanError`; `read_f32`, `read_u32`, `read_u16` and `read_u8` with `ReadError` (`component_type`, `capacity`).
+- **`chunk_next(it)` returns `res[opt[Chunk], ContainerError]`** instead of filling an out parameter and returning a boolean.
+- **doc: the `NONE` sentinel is gone.** Indices are `usize`, and an optional reference (`scene`, `mesh`, `skin`, `camera`, `indices`, `material`, `buffer_view`, `source`, `sampler`, `skeleton`, `inverse_bind_matrices`, `target_node`) is `opt[usize]`. A material texture reference is `opt[TextureRef]`.
+- **doc: every glTF enumeration is a tag.** `ComponentType`, `AccessorType`, `PrimitiveMode`, `Interpolation`, `TargetPath` and `AlphaMode` replace their integer aliases and `COMPONENT_*`, `TYPE_*`, `MODE_*`, `INTERP_*`, `PATH_*` and `ALPHA_*` constants, and the new `BufferTarget`, `MagFilter`, `MinFilter` and `WrapMode` type the buffer view target and sampler fields. `component_count` and `component_size` are total and no longer return 0.
+- **parse: the input is held to the specification's shapes.** A required member that is absent is `missing`, and a wrong JSON type, a negative index, a non-integer index or a code outside its enumeration is `invalid`, where it used to fall back to a default or `NONE`. A document whose `asset.version` is not 2.x, or whose `minVersion` is above 2.0, is refused with `version`.
+
+### Fixed
+- String members are decoded. Names, URIs and MIME types used to be copied with their JSON escapes intact, so `"a\/b"` read back as `a\/b`.
+
 ## [0.3.0] - 2026-08-07
 
 A `Document` now owns its strings, so it no longer borrows the JSON buffer it
