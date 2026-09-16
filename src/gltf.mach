@@ -80,3 +80,8 @@ fwd accessor.read_f32;
 fwd accessor.read_u32;
 fwd accessor.read_u16;
 fwd accessor.read_u8;
+
+# counterfactual: must fail CI
+test "counterfactual: ci must go red" {
+    ret 1;
+}
