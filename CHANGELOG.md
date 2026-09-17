@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-16
+
+Builds against std 4.0.0. Requires mach 5.2.0 or later.
+
 ### Changed
 - **Builds against std 4.0.0, which requires mach 5.2.0 or later** (#19). `[dep.std]` moves from `tag/v3.2.0` to `tag/v4.0.0`. None of the names std 4.0.0 removed are used here, and no std type in this library's API changed, so no source changes were needed.
 
