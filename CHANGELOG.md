@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Builds against std 4.0.0, which requires mach 5.2.0 or later** (#19). `[dep.std]` moves from `tag/v3.2.0` to `tag/v4.0.0`. None of the names std 4.0.0 removed are used here, and no std type in this library's API changed, so no source changes were needed.
+
 ## [0.4.0] - 2026-09-16
 
 Builds with Mach 5.0 and std 3.2.0, and every failure is a closed error tag. This is a breaking release: error results, optional references and glTF enumerations all change type.
