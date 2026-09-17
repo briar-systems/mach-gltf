@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- license: copyright is attributed to Briar Systems LLC (#25). The MIT terms are unchanged.
 - ci: a pushed `v*` tag is released by the family's shared release workflow (`briar-systems/.github` `mach-release.yml`). It checks the tag against the manifest version and the changelog, runs every CI leg, then publishes the GitHub release with that version's changelog section as notes (#23). A manual dispatch rehearses the same path without a tag.
 
 ## [0.4.1] - 2026-09-16
