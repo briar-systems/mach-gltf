@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- ci: the tag-triggered workflow file is `cd.yml`, the family-wide name (#31). Its content and `Release` name are unchanged.
 - ci: release runs are serialized per tag with a `concurrency` group, as the shared release workflow now requires, so a duplicate tag-push delivery waits and then finds the release already published (#29).
 - manifest: `[project]` declares the compiler range `mach = "^5.3"`, so mach 5.3 and later stop warning on every build (#27). mach 5.2.x rejects the key, so building now needs mach 5.3 or later.
 - license: copyright is attributed to Briar Systems LLC (#25). The MIT terms are unchanged.
