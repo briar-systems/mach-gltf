@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Builds against std 6.0.0** (#38). `[dep.std]` moves from `^5.7.1` to `^6.0`, realized to v6.0.0 by the committed `dep/std` gitlink. Verified from a clean build: no source change was needed, since nothing here sorts, uses `Heap`, `Map`, `Set`, constant-time comparisons or `buffers` accounts, the surfaces std 6 reshaped. `[project].mach` rises from `^5.5.2` to `^5.9`, the family seed.
+
 ## [0.5.0] - 2026-09-19
 
 Builds against std 5.7.1 and releases through the family CD workflow. Requires mach 5.5.2 or later.
