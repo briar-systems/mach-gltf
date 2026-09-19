@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-19
+
+Builds against std 5.7.1 and releases through the family CD workflow. Requires mach 5.5.2 or later.
+
 ### Changed
 - **Builds against std 5.7.1** (#33). `[dep.std]` moves from `tag/v4.0.0` to `tag/v5.7.1`, so this library resolves alongside a root project that pins std 5.x. Verified from a clean build: no source change was needed, since nothing here uses the clocks, cancellation scopes or `buffers.Source` that std 5 changed. `[project].mach` rises from `^5.3` to `^5.5.2`, which is what std 5.7.1 itself requires, and no higher.
 - ci: the tag-triggered workflow file is `cd.yml`, the family-wide name (#31). Its content and `Release` name are unchanged.
