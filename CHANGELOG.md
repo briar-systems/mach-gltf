@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-19
+
+Builds against std 5.7.1 and releases through the family CD workflow. Requires mach 5.5.2 or later.
+
+### Changed
+- **Builds against std 5.7.1** (#33). `[dep.std]` moves from `tag/v4.0.0` to the version range `^5.7.1`, realized to v5.7.1 by the committed `dep/std` gitlink, so this library resolves alongside a root project on any std 5.7+ minor instead of conflicting the day std tags the next one. Verified from a clean build: no source change was needed, since nothing here uses the clocks, cancellation scopes or `buffers.Source` that std 5 changed. `[project].mach` rises from `^5.3` to `^5.5.2`, which is what std 5.7.1 itself requires, and no higher.
+- ci: the tag-triggered workflow file is `cd.yml`, the family-wide name (#31). Its content and `Release` name are unchanged.
+- ci: release runs are serialized per tag with a `concurrency` group, as the shared release workflow now requires, so a duplicate tag-push delivery waits and then finds the release already published (#29).
+- manifest: `[project]` declares the compiler range `mach = "^5.3"`, so mach 5.3 and later stop warning on every build (#27). mach 5.2.x rejects the key, so building now needs mach 5.3 or later.
+- license: copyright is attributed to Briar Systems LLC (#25). The MIT terms are unchanged.
+- ci: a pushed `v*` tag is released by the family's shared release workflow (`briar-systems/.github` `mach-release.yml`). It checks the tag against the manifest version and the changelog, runs every CI leg, then publishes the GitHub release with that version's changelog section as notes (#23). A manual dispatch rehearses the same path without a tag.
+
 ## [0.4.1] - 2026-09-16
 
 Builds against std 4.0.0. Requires mach 5.2.0 or later.
