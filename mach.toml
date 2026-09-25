@@ -1,6 +1,6 @@
 [project]
 id = "gltf"
-version = "0.7.1"
+version = "0.7.2"
 mach = "^5.12"
 src = "src"
 out = "out/{target.name}/{profile.name}"
