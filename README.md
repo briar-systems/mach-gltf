@@ -16,12 +16,20 @@ fun accepts(h: *gltf.Header) bool {
 }
 ```
 
-Consuming projects vendor the loader as a normal Mach dependency:
+Consuming projects vendor the loader as a normal Mach dependency. Add it with
+`mach dep add`, which declares the dependency at a caret range over the newest
+compatible release and realizes it:
+
+```sh
+mach dep add . gltf --git https://github.com/briar-systems/mach-gltf
+```
+
+That writes this stanza to `mach.toml`:
 
 ```toml
 [dep.gltf]
 git = "https://github.com/briar-systems/mach-gltf"
-ref = "branch/main"
+version = "^0.7.0"
 ```
 
 Requires Mach 5.12 or newer and std 8.
