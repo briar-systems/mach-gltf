@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **Breaking: the library surface moves from `src/gltf.mach` to `src/lib/gltf.mach`, so its full module path is now `gltf.lib.gltf` instead of `gltf.gltf`** (#50). The `[artifact.gltf]` entry follows the family layout, where artifact entries sit under `src/lib/` or `src/bin/`. A bare `use gltf;` is unaffected, since it binds the default artifact's entry wherever that lives, and every other module path (`gltf.accessor`, `gltf.doc`, `gltf.glb`, `gltf.parse`, `gltf.bytes`) is unchanged. Only a consumer that imports the surface by its full path, `use gltf.gltf;`, must change it to `use gltf.lib.gltf;` or to the bare `use gltf;`. `mach test . --list` collects the same 38 tests as before.
+- The library surface moves from `src/gltf.mach` to `src/lib/gltf.mach`, following the family layout for artifact entries (#50). A bare `use gltf;` is unaffected, since it binds the default artifact's entry wherever that lives, and every other module path (`gltf.accessor`, `gltf.doc`, `gltf.glb`, `gltf.parse`, `gltf.bytes`) is unchanged. The entry module's own full path becomes `gltf.lib.gltf` in place of `gltf.gltf`. `src/lib/` is the artifact that builds a compiled library to ship, not the surface a direct dependency names, so a dependency imports the bare `use gltf;`. `mach test . --list` collects the same 38 tests as before.
 
 ## [0.7.1] - 2026-09-25
 
