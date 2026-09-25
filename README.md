@@ -24,7 +24,7 @@ git = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/main"
 ```
 
-Requires Mach 5.0 or newer and std 2.1.
+Requires Mach 5.12 or newer and std 8.
 
 ## Scope
 

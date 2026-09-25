@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-25
+
+### Changed
+- **Breaking: builds against std 8.0.0 and requires mach 5.12** (#43). `[dep.std]` moves from `^6.0` to `^8.0`, realized to v8.0.0 by the committed `dep/std` gitlink, and `[project].mach` rises from `^5.9` to `^5.12`, which std 8 requires. Resolution is flat, so a consumer of gltf must move to std 8 and mach 5.12 with it, and must rebuild anything that links std rather than only recompiling against the new sources. No source change was needed: nothing here calls `io.runtime.make`, reads `data.toml.Value` or uses `buffers.SecretSource`, the surfaces std 7 and 8 changed, and the page allocator now honouring `align` is used only by tests, which pass unchanged. Every test module is reached from `gltf.mach`, so mach 5.12's closure-scoped `mach test .` (briar-systems/mach#3813) still collects all 38 tests on every target. The README's requirement line now names mach 5.12 and std 8.
+- ci: the lib job seeds mach v5.12.0 until the family pin moves (briar-systems/.github#103) (#43).
+
 ## [0.6.0] - 2026-09-19
 
 Builds against std 6.0.0. Requires mach 5.9 or later.
