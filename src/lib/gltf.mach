@@ -2,7 +2,8 @@
 #
 # re-exports every public symbol of the split modules under one namespace so a
 # bare `use gltf;` reaches the whole API as gltf.MAGIC, gltf.Header, and so on.
-# `[project].module = "gltf.mach"` makes that bare import resolve here.
+# `[artifact.gltf]` is the default library artifact entered here, which makes
+# that bare import resolve to this module.
 
 use gltf.accessor;
 use gltf.doc;

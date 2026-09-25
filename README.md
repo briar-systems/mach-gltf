@@ -102,11 +102,14 @@ src/
   doc.mach       the typed glTF 2.0 document model and accessor-layout helpers
   parse.mach     JSON to document model, plus the load_glb convenience entry
   accessor.mach  typed, bounds-checked reads of accessor data out of buffer bytes
-  gltf.mach      library surface: re-exports every public symbol under `gltf.*`
+  lib/
+    gltf.mach    library surface and artifact entry: re-exports every public
+                 symbol under `gltf.*`
 ```
 
-The surface (`gltf.mach`) is what `[project].module = "gltf.mach"` binds, so a
-bare `use gltf;` reaches the whole API. It also carries `use std.runtime;` so a
+The surface (`lib/gltf.mach`, module `gltf.lib.gltf`) is the entry of
+`[artifact.gltf]`, the default library artifact, which is what a bare
+`use gltf;` binds, so it reaches the whole API. It also carries `use std.runtime;` so a
 library `mach test` links a runnable binary. New modules (a `.gltf` reader)
 forward through this surface as they land.
 
