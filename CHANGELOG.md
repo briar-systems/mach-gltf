@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-25
+
+### Fixed
+- The README adds the library with `mach dep add` and shows the stanza it writes, a `version = "^0.7.0"` release range rather than `ref = "branch/main"` (#42).
+
 ## [0.7.0] - 2026-09-25
 
 ### Changed
