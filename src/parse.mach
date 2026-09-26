@@ -1405,9 +1405,9 @@ test load_glb__container_vs_document_failure {
     var buf:  [64]u8;
     val n:    usize                  = assemble_glb(?buf[0], ?jbuf[0], jl, nil, 0);
     val dr:   res[Loaded, LoadError] = load_glb(?buf[0], n, ?a);
-    if (sel dr.ok)                    { ret 1; }
-    if (!sel dr.err.document)         { ret 1; }
-    if (!sel dr.err.document.invalid) { ret 1; }
+    if (sel dr.ok)                         { ret 1; }
+    if (!sel dr.err.document)              { ret 1; }
+    if (!sel dr.err.document.invalid)      { ret 1; }
     if (!sel dr.err.document.invalid.root) { ret 1; }
     ret 0;
 }
