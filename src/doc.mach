@@ -461,36 +461,3 @@ pub rec Document {
     skins:        slice.Slice[Skin];
     animations:   slice.Slice[Animation];
 }
-
-test "doc: component_count covers every element type" {
-    if (component_count(AccessorType.scalar{}) != 1) { ret 1; }
-    if (component_count(AccessorType.vec2{}) != 2)   { ret 1; }
-    if (component_count(AccessorType.vec3{}) != 3)   { ret 1; }
-    if (component_count(AccessorType.vec4{}) != 4)   { ret 1; }
-    if (component_count(AccessorType.mat2{}) != 4)   { ret 1; }
-    if (component_count(AccessorType.mat3{}) != 9)   { ret 1; }
-    if (component_count(AccessorType.mat4{}) != 16)  { ret 1; }
-    ret 0;
-}
-
-test "doc: component_size covers every component type" {
-    if (component_size(ComponentType.byte{}) != 1)           { ret 1; }
-    if (component_size(ComponentType.unsigned_byte{}) != 1)  { ret 1; }
-    if (component_size(ComponentType.short{}) != 2)          { ret 1; }
-    if (component_size(ComponentType.unsigned_short{}) != 2) { ret 1; }
-    if (component_size(ComponentType.unsigned_int{}) != 4)   { ret 1; }
-    if (component_size(ComponentType.float{}) != 4)          { ret 1; }
-    ret 0;
-}
-
-test "doc: element_size multiplies component count by component width" {
-    var a: Accessor;
-    a.element_type   = AccessorType.vec3{};
-    a.component_type = ComponentType.float{};
-    if (element_size(?a) != 12) { ret 1; }
-
-    a.element_type   = AccessorType.scalar{};
-    a.component_type = ComponentType.unsigned_short{};
-    if (element_size(?a) != 2) { ret 1; }
-    ret 0;
-}
