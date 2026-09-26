@@ -29,7 +29,7 @@ That writes this stanza to `mach.toml`:
 ```toml
 [dep.gltf]
 git = "https://github.com/briar-systems/mach-gltf"
-version = "^0.7.0"
+version = "^0.8.0"
 ```
 
 Requires Mach 6 or newer and std 9.
