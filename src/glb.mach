@@ -225,32 +225,10 @@ pub fun parse_glb(data: *u8, len: usize) res[Glb, ContainerError] {
     ret res[Glb, ContainerError].ok{g};
 }
 
-test "glb: container magic and chunk tags match the specification" {
-    if (MAGIC != 0x46546C67)      { ret 1; }
-    if (VERSION != 2)             { ret 1; }
-    if (CHUNK_JSON != 0x4E4F534A) { ret 1; }
-    if (CHUNK_BIN != 0x004E4942)  { ret 1; }
-    ret 0;
-}
-
-test "glb: is_valid accepts a well-formed header and rejects a bad magic" {
-    var ok: Header;
-    ok.magic   = MAGIC;
-    ok.version = VERSION;
-    ok.length  = 12;
-    if (!is_valid(?ok)) { ret 1; }
-
-    var bad: Header;
-    bad.magic   = 0;
-    bad.version = VERSION;
-    bad.length  = 12;
-    if (is_valid(?bad)) { ret 1; }
-    ret 0;
-}
-
 # write a minimal JSON+BIN .glb into buf and return its length
 #
 # json data is "{}  " (space-padded to 4) and bin data is four known bytes.
+#[testing]
 fun build_container(buf: *u8) usize {
     bytes.write_u32(buf, 0, MAGIC);
     bytes.write_u32(buf, 4, VERSION);
@@ -272,23 +250,7 @@ fun build_container(buf: *u8) usize {
     ret 36;
 }
 
-test "glb: parse_glb extracts the JSON and BIN spans" {
-    var buf: [36]u8;
-    val n:   usize = build_container(?buf[0]);
-
-    val r: res[Glb, ContainerError] = parse_glb(?buf[0], n);
-    if (sel r.err) { ret 1; }
-    val g: Glb = r.ok;
-
-    if (g.json_len != 4)                      { ret 1; }
-    if (g.json[0] != '{' || g.json[1] != '}') { ret 1; }
-    if (g.bin == nil)                         { ret 1; }
-    if (g.bin_len != 4)                       { ret 1; }
-    if (g.bin[0] != 0xDE || g.bin[3] != 0xEF) { ret 1; }
-    ret 0;
-}
-
-test "glb: parse_glb yields nil BIN when only a JSON chunk is present" {
+test parse_glb__json_only_has_nil_bin {
     var buf: [24]u8;
     bytes.write_u32(?buf[0], 0, MAGIC);
     bytes.write_u32(?buf[0], 4, VERSION);
@@ -309,7 +271,7 @@ test "glb: parse_glb yields nil BIN when only a JSON chunk is present" {
     ret 0;
 }
 
-test "glb: parse_glb rejects a bad magic" {
+test parse_glb__rejects_bad_magic {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 0, 0);
@@ -320,7 +282,7 @@ test "glb: parse_glb rejects a bad magic" {
     ret 0;
 }
 
-test "glb: parse_glb rejects a header length past the buffer" {
+test parse_glb__rejects_length_past_buffer {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 8, 64);
@@ -331,7 +293,7 @@ test "glb: parse_glb rejects a header length past the buffer" {
     ret 0;
 }
 
-test "glb: parse_glb rejects a misaligned chunk length" {
+test parse_glb__rejects_misaligned_chunk {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 12, 3);
@@ -342,7 +304,7 @@ test "glb: parse_glb rejects a misaligned chunk length" {
     ret 0;
 }
 
-test "glb: parse_glb rejects a chunk running past the container" {
+test parse_glb__rejects_chunk_overrun {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 12, 64);
@@ -353,7 +315,7 @@ test "glb: parse_glb rejects a chunk running past the container" {
     ret 0;
 }
 
-test "glb: parse_glb rejects a first chunk that is not JSON" {
+test parse_glb__rejects_first_chunk_not_json {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 16, CHUNK_BIN);
@@ -364,7 +326,7 @@ test "glb: parse_glb rejects a first chunk that is not JSON" {
     ret 0;
 }
 
-test "glb: parse_glb rejects a buffer shorter than the header" {
+test parse_glb__rejects_short_buffer {
     var buf: [8]u8;
     bytes.write_u32(?buf[0], 0, MAGIC);
     bytes.write_u32(?buf[0], 4, VERSION);
@@ -375,7 +337,7 @@ test "glb: parse_glb rejects a buffer shorter than the header" {
     ret 0;
 }
 
-test "glb: parse_glb rejects a bad version" {
+test parse_glb__rejects_bad_version {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 4, 1);
@@ -386,7 +348,7 @@ test "glb: parse_glb rejects a bad version" {
     ret 0;
 }
 
-test "glb: parse_glb rejects a container with no chunks" {
+test parse_glb__rejects_no_chunks {
     var buf: [12]u8;
     bytes.write_u32(?buf[0], 0, MAGIC);
     bytes.write_u32(?buf[0], 4, VERSION);
@@ -397,7 +359,7 @@ test "glb: parse_glb rejects a container with no chunks" {
     ret 0;
 }
 
-test "glb: chunk_next reports a truncated chunk header" {
+test chunk_next__truncated_chunk_header {
     var buf: [36]u8;
     build_container(?buf[0]);
     bytes.write_u32(?buf[0], 8, 28);

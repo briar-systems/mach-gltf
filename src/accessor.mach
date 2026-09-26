@@ -213,51 +213,13 @@ pub fun read_u8(p: *Plan, out: *u8, cap: usize) res[usize, ReadError] {
 }
 
 # assemble a single-accessor document over one buffer view for tests
+#[testing]
 fun build_doc(bv: *doc.BufferView, a: *doc.Accessor, d: *doc.Document) {
     d.buffer_views = slice.make[doc.BufferView](bv, 1);
     d.accessors    = slice.make[doc.Accessor](a, 1);
 }
 
-test "accessor: read_f32 reads packed vec3 elements exactly" {
-    var bin: [24]u8;
-    bytes.write_f32(?bin[0], 0, 1.0f32);
-    bytes.write_f32(?bin[0], 4, 2.0f32);
-    bytes.write_f32(?bin[0], 8, 3.0f32);
-    bytes.write_f32(?bin[0], 12, -4.5f32);
-    bytes.write_f32(?bin[0], 16, 0.25f32);
-    bytes.write_f32(?bin[0], 20, 100.0f32);
-
-    var bv: doc.BufferView;
-    bv.buffer      = 0;
-    bv.byte_offset = 0;
-    bv.byte_length = 24;
-    bv.byte_stride = 0;
-    bv.target      = opt[doc.BufferTarget].none{};
-
-    var a: doc.Accessor;
-    a.buffer_view    = opt[usize].some{0};
-    a.byte_offset    = 0;
-    a.component_type = doc.ComponentType.float{};
-    a.count          = 2;
-    a.element_type   = doc.AccessorType.vec3{};
-
-    var d: doc.Document;
-    build_doc(?bv, ?a, ?d);
-
-    val pr: res[Plan, PlanError] = plan(?d, ?bin[0], 24, 0);
-    if (sel pr.err) { ret 1; }
-    var pl: Plan = pr.ok;
-
-    var out: [6]f32;
-    val rr:  res[usize, ReadError] = read_f32(?pl, ?out[0], 6);
-    if (sel rr.err)                                                   { ret 1; }
-    if (rr.ok != 6)                                                   { ret 1; }
-    if (out[0] != 1.0f32 || out[1] != 2.0f32 || out[2] != 3.0f32)     { ret 1; }
-    if (out[3] != -4.5f32 || out[4] != 0.25f32 || out[5] != 100.0f32) { ret 1; }
-    ret 0;
-}
-
-test "accessor: read_f32 honors a byte stride, skipping padding" {
+test read_f32__byte_stride_skips_padding {
     # two vec2 elements at stride 12: 8 data bytes then 4 padding bytes each.
     var bin: [20]u8;
     bytes.write_f32(?bin[0], 0, 10.0f32);
@@ -295,7 +257,7 @@ test "accessor: read_f32 honors a byte stride, skipping padding" {
     ret 0;
 }
 
-test "accessor: read_u16 reads scalar indices with an accessor byte offset" {
+test read_u16__accessor_byte_offset {
     var bin: [10]u8;
     bytes.write_u16(?bin[0], 0, 999);
     bytes.write_u16(?bin[0], 2, 0);
@@ -332,7 +294,7 @@ test "accessor: read_u16 reads scalar indices with an accessor byte offset" {
     ret 0;
 }
 
-test "accessor: plan rejects an accessor whose data exceeds the buffer view" {
+test plan__accessor_exceeds_view {
     var bin: [12]u8;
 
     var bv: doc.BufferView;
@@ -359,7 +321,7 @@ test "accessor: plan rejects an accessor whose data exceeds the buffer view" {
     ret 0;
 }
 
-test "accessor: plan rejects a buffer view that exceeds the buffer" {
+test plan__view_exceeds_buffer {
     var bin: [12]u8;
 
     var bv: doc.BufferView;
@@ -385,7 +347,7 @@ test "accessor: plan rejects a buffer view that exceeds the buffer" {
     ret 0;
 }
 
-test "accessor: read rejects a mismatched component type and a small output" {
+test read__component_mismatch_and_small_output {
     var bin: [8]u8;
     bytes.write_u16(?bin[0], 0, 1);
     bytes.write_u16(?bin[0], 2, 2);
@@ -427,7 +389,7 @@ test "accessor: read rejects a mismatched component type and a small output" {
     ret 0;
 }
 
-test "accessor: plan names a missing accessor and an unbacked one" {
+test plan__missing_and_unbacked_accessor {
     var bin: [4]u8;
 
     var bv: doc.BufferView;

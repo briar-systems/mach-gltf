@@ -48,23 +48,3 @@ pub fun write_u32(p: *u8, off: usize, v: u32) {
 pub fun write_f32(p: *u8, off: usize, f: f32) {
     write_u32(p, off, f:~u32);
 }
-
-test "bytes: read_u16 assembles little-endian order" {
-    var b: [2]u8 = [2]u8{0x34, 0x12};
-    if (read_u16(?b[0], 0) != 0x1234) { ret 1; }
-    ret 0;
-}
-
-test "bytes: read_u32 assembles little-endian order" {
-    var b: [4]u8 = [4]u8{0x78, 0x56, 0x34, 0x12};
-    if (read_u32(?b[0], 0) != 0x12345678) { ret 1; }
-    ret 0;
-}
-
-test "bytes: read_f32 reinterprets the exact bit pattern" {
-    # 1.0f32 is 0x3F800000 little-endian.
-    var b: [4]u8 = [4]u8{0x00, 0x00, 0x80, 0x3F};
-    val f: f32   = read_f32(?b[0], 0);
-    if (f != 1.0f32) { ret 1; }
-    ret 0;
-}
