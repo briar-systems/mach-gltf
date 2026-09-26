@@ -32,7 +32,7 @@ git = "https://github.com/briar-systems/mach-gltf"
 version = "^0.7.0"
 ```
 
-Requires Mach 5.12 or newer and std 8.
+Requires Mach 6 or newer and std 9.
 
 ## Scope
 
@@ -124,8 +124,7 @@ target.
 
 ## Tests
 
-`test` blocks live beside the code they cover and are display-free. They pin the
-container tags and header layout against the glTF 2.0 specification, build
+`test` blocks live beside the code they cover and are display-free. They build
 synthetic `.glb` fixtures as bytes in test code — integer and float JSON with a
 BIN chunk of known `float32` data — and assert the parsed document structure,
 exact accessor reads, and rejection of malformed containers and out-of-bounds
