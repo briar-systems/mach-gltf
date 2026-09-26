@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-26
+
+### Changed
+- **Breaking: builds against std 9.0.0 and requires mach 6** (#54). `[dep.std]` moves from `^8.0` to `^9.0`, realized to v9.0.0 by the committed `dep/std` gitlink, and `[project].mach` rises from `^5.12` to `^6`, which std 9 requires. Resolution is flat, so a consumer of mach-gltf must move to std 9 and mach 6 with it. No library source changed.
+- test: tests are named with identifiers (`test subject__case`), as mach 6 requires, and pruned to the mach 6 test policy, from 38 to 27 (#54). The byte readers, element size tables, glb spec constants and `is_valid` checks are dropped, as are tests another covers: the `parse_glb` happy path and the packed vec3 read, both exercised by `load_glb__accessor_reads_over_bin`, and the non-object root check, now asserted in `load_glb__container_vs_document_failure`. Test-only helpers are `#[testing]`.
+- ci: the lib job seeds mach v6.0.0 until the family pin moves (briar-systems/.github#103) (#54).
+- docs: the README states the mach 6 and std 9 requirement (#54), and its dependency stanza names `version = "^0.8.0"`.
+
 ## [0.7.2] - 2026-09-25
 
 ### Changed
