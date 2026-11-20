@@ -3,16 +3,17 @@
 A [glTF 2.0](https://registry.khronos.org/glTF/) loader written in pure Mach:
 no C, no Assimp, no FFI. It reads both container forms — `.gltf` (a JSON
 document with external buffers) and `.glb` (the binary container) — and
-produces engine-agnostic, in-memory scene data. Project id is `gltf`, so
-consumers reach everything as `gltf.*`.
+produces engine-agnostic, in-memory scene data. Project id is `gltf`, and a
+consumer imports each module by its source path, such as `use gltf.glb;`.
 
 ```mach
-use gltf;
+use gltf.glb;
+use std.types.bool.bool;
 
 # a .glb file opens with a 12-byte header carrying the container magic and
 # version; validate it before trusting the chunks that follow.
-fun accepts(h: *gltf.Header) bool {
-    ret gltf.is_valid(h);
+fun accepts(h: *glb.Header) bool {
+    ret glb.is_valid(h);
 }
 ```
 
@@ -32,7 +33,7 @@ git = "https://github.com/briar-systems/mach-gltf"
 version = "^0.8.0"
 ```
 
-Requires Mach 6 or newer and std 9.
+Requires Mach 7.
 
 ## Scope
 
@@ -67,12 +68,12 @@ deliberately out of scope here so the loader stays engine-agnostic.
 ## Dependencies
 
 JSON parsing is a prerequisite: the `.gltf` document and the `.glb` JSON chunk
-are both JSON, and it comes from the standard library
-([`std.data.json`](https://github.com/briar-systems/mach-std)) rather than an
-in-tree parser. `std.data.json` now parses the full RFC 8259 number grammar, so
-glTF's floating-point values — node transforms, accessor bounds, and material
-factors — load directly; the committed `dep/std` gitlink pins the std release
-carrying that support.
+are both JSON, and it comes from the
+[mach-json](https://github.com/briar-systems/mach-json) package rather than an
+in-tree parser. mach-json parses the full RFC 8259 number grammar, so glTF's
+floating-point values — node transforms, accessor bounds, and material
+factors — load directly. Besides mach-json the loader depends only on the
+standard library ([mach-std](https://github.com/briar-systems/mach-std)).
 
 ## Status
 
@@ -103,24 +104,24 @@ src/
   parse.mach     JSON to document model, plus the load_glb convenience entry
   accessor.mach  typed, bounds-checked reads of accessor data out of buffer bytes
   lib/
-    gltf.mach    library surface and artifact entry: re-exports every public
-                 symbol under `gltf.*`
+    gltf.mach    entry of the prebuilt library artifact
 ```
 
-The surface (`lib/gltf.mach`, module `gltf.lib.gltf`) is the entry of
-`[artifact.gltf]`, the default library artifact, which is what a bare
-`use gltf;` binds, so it reaches the whole API. It also carries `use std.runtime;` so a
-library `mach test` links a runnable binary. New modules (a `.gltf` reader)
-forward through this surface as they land.
+`lib/gltf.mach` (module `gltf.lib.gltf`) is the entry of `[artifact.gltf]`,
+the exported static library. Its `fwd` list decides what the prebuilt
+`libgltf` carries and is not the API a dependent project imports: a consumer
+imports the modules above by their source paths (`use gltf.parse;`,
+`use gltf.accessor;`). The entry also carries `use std.runtime;` so a library
+`mach test` links a runnable binary. New modules (a `.gltf` reader) are added
+to its `fwd` list as they land.
 
 ## Multiplatform
 
 The loader is pure parsing — no system libraries, no display, no OS calls — so
 it builds for every target the Mach toolchain can emit. Run `mach info targets`
 for the authoritative matrix of the compiler in use; the current prime set is
-x86-64 and aarch64 across Linux, macOS, and Windows (Windows is x86-64 only, as
-COFF carries no aarch64 relocations), with riscv64-linux as a cross-compile
-target.
+x86-64 and aarch64 across Linux, macOS, and Windows, with riscv64-linux as a
+cross-compile target.
 
 ## Tests
 
