@@ -1,9 +1,8 @@
-# the flat public surface of the glTF 2.0 loader
+# the entry of the prebuilt glTF 2.0 loader library
 #
-# re-exports every public symbol of the split modules under one namespace so a
-# bare `use gltf;` reaches the whole API as gltf.MAGIC, gltf.Header, and so on.
-# `[artifact.gltf]` is the default library artifact entered here, which makes
-# that bare import resolve to this module.
+# `[artifact.gltf]`, the exported static library, is entered here, and the fwd
+# list decides what libgltf carries. consumers import the modules by their
+# source paths (`use gltf.glb;`), not through this entry.
 
 use gltf.accessor;
 use gltf.doc;

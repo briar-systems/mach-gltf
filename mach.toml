@@ -1,59 +1,60 @@
 [project]
 id = "gltf"
 version = "0.8.0"
-mach = "^6"
+mach = "^7"
 src = "src"
-out = "out/{target.name}/{profile.name}"
+work = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
-isa = "x86_64"
-os  = "linux"
+arch = "x86_64"
+sys = "linux"
 abi = "sysv64"
 
 [target.windows]
-isa = "x86_64"
-os  = "windows"
+arch = "x86_64"
+sys = "windows"
 abi = "win64"
 
 [target.darwin]
-isa = "x86_64"
-os  = "darwin"
+arch = "x86_64"
+sys = "darwin"
 abi = "sysv64"
 
 [target.linux-arm64]
-isa = "aarch64"
-os  = "linux"
+arch = "aarch64"
+sys = "linux"
 abi = "aapcs64"
 
 [target.darwin-aarch64]
-isa = "aarch64"
-os  = "darwin"
-abi = "aapcs64"
+arch = "aarch64"
+sys = "darwin"
+abi = "darwinpcs"
 
 [profile.debug]
 default = true
-opt = 0
+optimize = false
 debug = true
 simd = "scalarize"
-vectorize = false
-float_reassoc = false
 
 [profile.release]
-opt = 2
+optimize = true
 debug = false
 simd = "scalarize"
-vectorize = false
-float_reassoc = false
 
 [artifact.gltf]
 kind = "static"
 entry = "lib/gltf.mach"
-out = "lib/gltf"
+out = "{project.work}/lib/libgltf{artifact.suffix}"
 targets = ["*"]
 link = []
 need = []
 default = true
+export = true
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^9.0"
+ref = "branch/dev"
+
+[dep.json]
+git = "https://github.com/briar-systems/mach-json"
+ref = "branch/dev"
